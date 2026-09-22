@@ -1,3 +1,68 @@
+> ## About this fork — a VESA VBE/AI proof of concept
+>
+> This is a personal fork of [DOSBox-X](https://github.com/joncampbell123/dosbox-x). It adds a
+> working implementation of **VESA VBE/AI 1.0** — the VESA Audio Interface — directly inside the
+> emulated BIOS. It is a **proof of concept**, it is **not affiliated with the DOSBox-X project**,
+> and it has not been proposed for merging upstream. Everything below this box is the original
+> DOSBox-X README, unchanged.
+>
+> ### What VBE/AI was
+>
+> VBE/AI is a 1994 VESA standard that tried to do for sound cards what VBE did for graphics:
+> give DOS programs one BIOS-level audio API so they would not each have to ship a driver for
+> every sound card on the market. A program called `INT 10h, AX=4F13h` to discover what audio
+> devices existed, then opened one and received a table of `pascal far` function pointers for
+> the real work — set a PCM format, register a sample buffer, start playback, send MIDI.
+>
+> It never caught on. A handful of drivers shipped in the VESA SDK, almost no hardware exposed
+> it in ROM, and DOS audio stayed the way it was: every game bundling its own Sound Blaster,
+> Gravis and Adlib code. So there has never been much opportunity to see what the standard
+> actually feels like from the application side.
+>
+> ### What this fork does
+>
+> It puts the provider in the emulator rather than in the guest. DOSBox-X already answers VBE
+> video calls from its own emulated BIOS (`src/ints/int10_vesa.cpp`); this does the same thing
+> for audio in `src/ints/int10_vesa_ai.cpp`, backed by the internal mixer. **No driver is loaded
+> in DOS** — a DOS program calls `AX=4F13h` and the interface is simply there, the way it would
+> have been on a machine whose sound card shipped VBE/AI in ROM. It is off behind a config
+> switch:
+>
+> ```ini
+> [vbeai]
+> vbeai    = true
+> midimode = auto        ; auto, transmitter, opl2, opl3, none
+> midibank = GENMIDI.LMP ; an instrument bank for the FM modes
+> ```
+>
+> ### Did it work?
+>
+> **Yes.** Digital audio, MIDI, FM synthesis and both devices at once all play correctly under
+> the emulator, driven by a real-mode DOS test program that uses nothing but the interface:
+>
+> | | Result |
+> | --- | --- |
+> | WAVE playback | Mixer capture correlates with the source file at **0.992**, unity gain, no drift |
+> | MIDI | Byte-exact against the source files — 14006 bytes for `ALFRE.MID`, 4828 for `SAKURA2A.MID` |
+> | FM synthesis | OPL2/OPL3 voice allocation matches independently computed polyphony; pitch within **0.03%** of equal temperament |
+> | Both at once | WAVE and MIDI play simultaneously with no measurable cost to either |
+> | Host test harness | **187 assertions**, all passing |
+>
+> Verification found one real bug along the way: re-striking a key under the sustain pedal
+> leaked an OPL voice, quietly starving the chip on heavily pedalled music. Nothing crashed and
+> no note hung — it was audible only as music that was subtly wrong.
+>
+> ### Where to look
+>
+> | | |
+> | --- | --- |
+> | [`docs/vbeai.md`](docs/vbeai.md) | Consolidated VBE/AI 1.0 reference, implementation notes, and how each claim above was verified |
+> | [`src/ints/int10_vesa_ai.cpp`](src/ints/int10_vesa_ai.cpp) | The provider |
+> | [`src/ints/vbeai_fm.cpp`](src/ints/vbeai_fm.cpp) | MIDI-to-OPL synthesiser for the FM modes |
+> | [`contrib/vbeai-test/`](contrib/vbeai-test/) | DOS test program, and a host-side white-box harness |
+>
+> Recording, MIDI input and the Volume device class are not implemented.
+
 
 **Welcome to the DOSBox-X project homepage located on GitHub.**
 
