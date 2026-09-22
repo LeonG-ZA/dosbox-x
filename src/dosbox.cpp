@@ -4219,6 +4219,50 @@ void DOSBOX_SetupConfigSections(void) {
         "  on:        Filter the output (default).\n"
         "  off:       Don't filter the output.");
 
+    secprop = control->AddSection_prop("vbeai",&Null_Init,true);//done
+    Pbool = secprop->Add_bool("vbeai",Property::Changeable::WhenIdle,true);
+    Pbool->Set_help("Enable the VESA VBE/AI (VESA Audio Interface) provider, INT 10h AX=4F13h.\n"
+                    "DOSBox-X answers VBE/AI calls directly from its own emulated BIOS, the same way\n"
+                    "it answers the VESA VBE video calls, so no VBE/AI driver needs to be loaded in\n"
+                    "the guest. WAVE audio is rendered through the 'VBEAI' mixer channel and MIDI\n"
+                    "is forwarded to whatever [midi] mididevice is set to; no I/O port range, IRQ\n"
+                    "or DMA channel is used. The WAVE and MIDI device classes are provided (the\n"
+                    "MIDI one only when a MIDI output is configured); recording, MIDI input and the\n"
+                    "Volume device class are not. See docs/vbeai.md for details.");
+    Pbool->SetBasic(true);
+
+    Pstring = secprop->Add_string("midimode",Property::Changeable::WhenIdle,"auto");
+    const char* vbeaimidimodes[] = { "auto", "transmitter", "opl2", "opl3", "none", 0 };
+    Pstring->Set_values(vbeaimidimodes);
+    Pstring->Set_help("What kind of MIDI device the VBE/AI provider presents. This is a VBE/AI-level\n"
+                      "choice, not a [midi] one: it decides the advertised feature bits, chip name and\n"
+                      "voice count that a VBE/AI application sees.\n"
+                      "  auto:        Same as 'transmitter' if a MIDI output is configured in [midi],\n"
+                      "               otherwise no MIDI device is offered at all.\n"
+                      "  transmitter: Advertise a MIDI transmitter/receiver and forward the stream to\n"
+                      "               whatever [midi] mididevice is set to. Needs such an output.\n"
+                      "  opl2:        Interpret the MIDI stream on a private OPL2, 9 voices.\n"
+                      "  opl3:        Interpret the MIDI stream on a private OPL3, 18 voices.\n"
+                      "  none:        Provide no MIDI device, leaving only the WAVE device.\n"
+                      "The OPL modes use their own OPL chip and mixer channel, separate from the one\n"
+                      "[sblaster] oplmode drives, so they work regardless of that setting and cannot\n"
+                      "collide with a game's own Adlib writes. Their built-in instruments are rough\n"
+                      "originals; an application can replace any of them via msPreLoadPatch,\n"
+                      "or you can point 'midibank' at a proper instrument bank.");
+    Pstring->SetBasic(true);
+
+    Pstring = secprop->Add_string("midibank",Property::Changeable::WhenIdle,"");
+    Pstring->Set_help("Instrument bank for the opl2/opl3 midimodes. Leave empty to use the built-in\n"
+                      "instruments, which are rough originals. Two formats are understood, told\n"
+                      "apart by their signature:\n"
+                      "  DMX GENMIDI, as used by Doom and its descendants ('#OPL_II#'). Freedoom's\n"
+                      "    genmidi.lmp is a freely licensed one.\n"
+                      "  Ad Lib .BNK ('ADLIB-'), such as the FATV10.BNK that ships with the VESA\n"
+                      "    VBE/AI SDK. Note that one is not free: see its TERMS file.\n"
+                      "A bank that cannot be read is reported and ignored, leaving the built-in\n"
+                      "instruments in place. Has no effect in the other midimodes.");
+    Pstring->SetBasic(true);
+
     secprop = control->AddSection_prop("speaker",&Null_Init,true);//done
     Pbool = secprop->Add_bool("pcspeaker",Property::Changeable::WhenIdle,true);
     Pbool->Set_help("Enable PC-Speaker emulation.");
