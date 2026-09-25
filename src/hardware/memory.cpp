@@ -182,6 +182,7 @@ bool ACPI_init() {
 
 static MEM_Callout_t lfb_mem_cb = MEM_Callout_t_none;
 static MEM_Callout_t lfb_mmio_cb = MEM_Callout_t_none;
+static MEM_Callout_t lfb_mmio2_cb = MEM_Callout_t_none;
 
 #define MEM_callouts_max (MEM_TYPE_MAX - MEM_TYPE_MIN)
 #define MEM_callouts_index(t) (t - MEM_TYPE_MIN)
@@ -231,6 +232,11 @@ static struct MemoryBlock {
         Bitu        pages;
         PageHandler *handler;
     } lfb_mmio = {};
+    struct {                    /* second MMIO range (ATI mach64: register page of the little endian aperture) */
+        Bitu        start_page;
+        Bitu        end_page;
+        Bitu        pages;
+    } lfb_mmio2 = {};
     struct {
         bool enabled;
         uint8_t controlport;
@@ -700,6 +706,10 @@ void lfb_mem_cb_free(void) {
         MEM_FreeCallout(lfb_mmio_cb);
         lfb_mmio_cb = MEM_Callout_t_none;
     }
+    if (lfb_mmio2_cb != MEM_Callout_t_none) {
+        MEM_FreeCallout(lfb_mmio2_cb);
+        lfb_mmio2_cb = MEM_Callout_t_none;
+    }
 }
 
 PageHandler* lfb_memio_cb(MEM_CalloutObject &co,Bitu phys_page) {
@@ -709,6 +719,8 @@ PageHandler* lfb_memio_cb(MEM_CalloutObject &co,Bitu phys_page) {
     if (phys_page >= memory.lfb.start_page && phys_page < memory.lfb.end_page)
         return memory.lfb.handler;
     if (phys_page >= memory.lfb_mmio.start_page && phys_page < memory.lfb_mmio.end_page)
+        return memory.lfb_mmio.handler;
+    if (phys_page >= memory.lfb_mmio2.start_page && phys_page < memory.lfb_mmio2.end_page)
         return memory.lfb_mmio.handler;
 
     return NULL;
@@ -722,6 +734,10 @@ void lfb_mem_cb_init() {
     if (lfb_mmio_cb == MEM_Callout_t_none) {
         lfb_mmio_cb = MEM_AllocateCallout(pcibus_enable ? MEM_TYPE_PCI : MEM_TYPE_ISA);
         if (lfb_mmio_cb == MEM_Callout_t_none) E_Exit("Unable to allocate mmio cb for LFB");
+    }
+    if (lfb_mmio2_cb == MEM_Callout_t_none) {
+        lfb_mmio2_cb = MEM_AllocateCallout(pcibus_enable ? MEM_TYPE_PCI : MEM_TYPE_ISA);
+        if (lfb_mmio2_cb == MEM_Callout_t_none) E_Exit("Unable to allocate mmio cb for LFB");
     }
 
     {
@@ -756,6 +772,21 @@ void lfb_mem_cb_init() {
 
         MEM_PutCallout(cb);
     }
+
+    {
+        MEM_CalloutObject *cb = MEM_GetCallout(lfb_mmio2_cb);
+
+        assert(cb != NULL);
+
+        cb->Uninstall();
+        if (memory.lfb_mmio2.pages != 0) {
+            Bitu p2sz = 1;
+            while (p2sz < memory.lfb_mmio2.pages) p2sz <<= (Bitu)1;
+            cb->Install(memory.lfb_mmio2.start_page,MEMMASK_Combine(MEMMASK_FULL,MEMMASK_Range(p2sz)),lfb_memio_cb);
+        }
+
+        MEM_PutCallout(cb);
+    }
 }
 
 /* TODO: At some point, this common code needs to be removed and the S3 emulation (or whatever else)
@@ -779,14 +810,22 @@ void MEM_SetLFB(Bitu page, Bitu pages, PageHandler *handler, PageHandler *mmioha
     }
 
     memory.lfb_mmio.handler=mmiohandler;
+    memory.lfb_mmio2.start_page=0;
+    memory.lfb_mmio2.end_page=0;
+    memory.lfb_mmio2.pages=0;
     if (mmiohandler != NULL) {
         /* FIXME: Why is this hard-coded? There's more than just S3 emulation in this code's future! */
         if (svgaCard == SVGA_ATI && atiCard == ATI_Mach64GT) {
-            /* ATI mach64 GT: 8 MB little endian aperture whose last 4 KB page holds
-             * register blocks 1 and 0 (RRG-G02700 2-2) */
-            memory.lfb_mmio.start_page=page+(0x7FF000/4096);
-            memory.lfb_mmio.end_page=page+(0x7FF000/4096)+1;
-            memory.lfb_mmio.pages=1;
+            /* ATI mach64 GT: 16 MB BAR, two 8 MB apertures (little endian, then big
+             * endian); the last 4 KB page of each holds register blocks 1 and 0
+             * (RRG-G02700 2-2; ATI's Windows 9x driver uses the copy at +FFF000h).
+             * The whole big endian half goes to the mmio handler. */
+            memory.lfb_mmio.start_page=page+(0x800000/4096);
+            memory.lfb_mmio.end_page=page+(0x1000000/4096);
+            memory.lfb_mmio.pages=0x800000/4096;
+            memory.lfb_mmio2.start_page=page+(0x7FF000/4096);
+            memory.lfb_mmio2.end_page=page+(0x800000/4096);
+            memory.lfb_mmio2.pages=1;
         }
         else if (svgaCard == SVGA_S3Trio && (s3Card == S3_Trio64V || s3Card == S3_Vision868 || s3Card == S3_Vision968 || s3Card == S3_ViRGE || s3Card == S3_ViRGEVX)) {
             /* 64MB BAR. According to the datasheet, this 64MB region is split into two 32MB halves,

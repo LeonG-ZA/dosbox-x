@@ -6143,6 +6143,7 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 	S3_ViRGE_VSync();
 	/* ATI mach64 GT: CRTC_VBLANK_INT latch */
 	Mach64_VerticalRetrace();
+	{ extern void Mach64_AutoShot(void); Mach64_AutoShot(); }  /* TEST HOOK, not for upstream */
 
 	dbg_event_maxscan = false;
 	dbg_event_scanstep = false;

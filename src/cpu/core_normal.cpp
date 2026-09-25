@@ -186,6 +186,10 @@ Bits CPU_Core_Normal_Run(void) {
 #endif
 #endif
 		cycle_count++;
+		{   /* TEST HOOK (not for upstream): ATI driver code coverage */
+			extern bool mach64_cov_on; extern void Mach64_CovHook(void);
+			if (GCC_UNLIKELY(mach64_cov_on)) Mach64_CovHook();
+		}
 restart_opcode:
 		switch (core.opcode_index+Fetchb()) {
 		#include "core_normal/prefix_none.h"

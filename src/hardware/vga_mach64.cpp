@@ -362,7 +362,45 @@ uint8_t *Mach64_DrawLine(Bitu vidstart, Bitu line, uint8_t *templine) {
 
 /* TEST HOOK (not for upstream): DOSBOX_X_AUTOSHOT="ms,ms,..." takes DOSBox-X
  * screenshots at those emulated times, for automated testing of the scanout. */
-static void Mach64_AutoShot(void) {
+/* TEST HOOK (not for upstream): DOSBOX_X_EIPSAMPLE=1 logs CS:EIP and the code bytes every 30 frames */
+#include "regs.h"
+#include "cpu.h"
+static void Mach64_EIPSample(void) {
+	static int enabled = -1;
+	static unsigned int frame = 0;
+	if (enabled < 0) enabled = getenv("DOSBOX_X_EIPSAMPLE") ? 1 : 0;
+	if (!enabled || (++frame % 30) != 0) return;
+	/* DOSBOX_X_MEMDUMP=start,len,file: dump guest linear memory once, 60 s in */
+	static bool dumped = false;
+	const char *md = getenv("DOSBOX_X_MEMDUMP");
+	static unsigned int inloop = 0;
+	if (reg_eip >= 0xC1440000u && reg_eip < 0xC1450000u) inloop++;
+	if (md && !dumped && inloop >= 5) {
+		dumped = true;
+		unsigned long start = 0, len = 0; char fn[256] = {0};
+		if (sscanf(md, "%lx,%lx,%255s", &start, &len, fn) == 3) {
+			FILE *f = fopen(fn, "wb");
+			if (f) { for (unsigned long i = 0; i < len; i++) fputc(mem_readb((PhysPt)(start + i)), f); fclose(f); }
+		}
+	}
+	const PhysPt lin = (PhysPt)(SegPhys(cs) + reg_eip);
+	char bytes[64]; char *b = bytes;
+	for (int i = 0; i < 16; i++) b += sprintf(b, "%02x", mem_readb(lin + i));
+	LOG_MSG("EIP %04x:%08x pm=%d v86=%d lin=%08x eax=%08x ecx=%08x edx=%08x code=%s",
+		(unsigned)SegValue(cs), (unsigned)reg_eip, cpu.pmode ? 1 : 0, (reg_flags & FLAG_VM) ? 1 : 0, (unsigned)lin,
+		(unsigned)reg_eax, (unsigned)reg_ecx, (unsigned)reg_edx, bytes);
+	if ((reg_eax & 0xFFFF0000u) == 0xCB6F0000u) {
+		const PhysPt a = (PhysPt)(reg_eax & ~0xFFFu);
+		LOG_MSG("EIP  lin %08x -> phys %08x (lfb base %08x, cfg %02x cmd %02x)", (unsigned)a,
+			(unsigned)PAGING_GetPhysicalAddress(a), (unsigned)mach64.pci_lfb_base, mach64.pci_cfg40, mach64.pci_command);
+	}
+}
+
+#include "vga_mach64_cov.cpp"   /* TEST HOOK (not for upstream) */
+
+void Mach64_AutoShot(void) {
+	Mach64_EIPSample();
+	Mach64_CovInit();
 	static bool parsed = false;
 	static double shots[16];
 	static unsigned int nshots = 0, next = 0;
@@ -378,13 +416,13 @@ static void Mach64_AutoShot(void) {
 	if (next < nshots && PIC_FullIndex() >= shots[next]) {
 		extern void CAPTURE_ScreenShotEvent(bool pressed);
 		CAPTURE_ScreenShotEvent(true);
+		Mach64_CovDump("screenshot");
 		next++;
 	}
 }
 
 void Mach64_VerticalRetrace(void) {
 	if (!Mach64_Present()) return;
-	Mach64_AutoShot();
 	/* CRTC_VBLANK_INT latches at the vertical blank [RRG 4-26]. No interrupt
 	 * is delivered: the PCI function reports no interrupt pin. */
 	mach64.reg[M64_CRTC_INT_CNTL] |= (1u << 2);
@@ -451,7 +489,7 @@ static void Mach64_WriteDACRegs(unsigned int lane, uint8_t v) {
 	}
 }
 
-uint32_t Mach64_ReadReg(unsigned int reg) {
+static uint32_t Mach64_ReadRegInner(unsigned int reg) {
 	reg &= 0x1FF;
 	if (reg >= 0x100) {
 		if (reg == M64_VMC_STATUS) return 0;
@@ -531,9 +569,28 @@ uint32_t Mach64_ReadReg(unsigned int reg) {
 	return mach64.reg[reg];
 }
 
+/* TEST HOOK (not for upstream): DOSBOX_X_M64TRACE=N logs the first N register accesses */
+static long m64_trace_left = -1;
+static inline bool Mach64_Trace(void) {
+	if (m64_trace_left < 0) {
+		const char *e = getenv("DOSBOX_X_M64TRACE");
+		m64_trace_left = e ? atol(e) : 0;
+	}
+	if (m64_trace_left == 0) return false;
+	m64_trace_left--;
+	return true;
+}
+
+uint32_t Mach64_ReadReg(unsigned int reg) {
+	const uint32_t v = Mach64_ReadRegInner(reg);
+	if (Mach64_Trace()) LOG_MSG("M64T R %03x = %08x", reg & 0x1FF, v);
+	return v;
+}
+
 void Mach64_WriteReg(unsigned int reg, uint32_t val, uint32_t mask) {
 	reg &= 0x1FF;
 	val &= mask;
+	if (Mach64_Trace()) LOG_MSG("M64T W %03x = %08x mask %08x", reg, val, mask);
 
 	if (reg >= 0x40 && reg < 0x100) {
 		Mach64_Accel_Write(reg, val, mask);
@@ -802,8 +859,11 @@ static bool Mach64_Block1Enabled(void) {
 	return (R(M64_BUS_CNTL) & (1u << 27)) != 0;   /* BUS_EXT_REG_EN [RRG 4-8] */
 }
 
-/* The last 4 KB page of the 8 MB little-endian aperture: video memory in the
- * first 2 KB (if the card has 8 MB), block 1 at 7FF800h, block 0 at 7FFC00h. */
+/* The register pages and the big endian aperture. The 16 MB BAR holds two
+ * 8 MB apertures, little endian then big endian [RRG 2-2]; the last 4 KB page
+ * of each has video memory in its first 2 KB, block 1 at +800h (while
+ * BUS_EXT_REG_EN) and block 0 at +C00h. The rest of the big endian aperture is
+ * video memory; the byte swapping it would apply is not emulated. */
 class Mach64_ApertureRegPage : public PageHandler {
 public:
 	Mach64_ApertureRegPage() : PageHandler(PFLAG_NOCODE) {}
@@ -815,28 +875,32 @@ public:
 	void writew(PhysPt addr, uint16_t val) override { wr(addr, val, 2); }
 	void writed(PhysPt addr, uint32_t val) override { wr(addr, val, 4); }
 private:
+	/* register offset from block 1, or -1 for video memory */
+	static int RegOffset(uint32_t ap) {
+		if ((ap & 0x7FF000u) != 0x7FF000u) return -1;
+		const unsigned int off = ap & 0xFFFu;
+		if (off < 0x800 || (off < 0xC00 && !Mach64_Block1Enabled())) return -1;
+		return (int)(off - 0x800);
+	}
 	static uint32_t rd(PhysPt addr, unsigned int len) {
-		const unsigned int off = (unsigned int)(PAGING_GetPhysicalAddress(addr) & 0xFFF);
-		if (off + len > 0x1000) len = 0x1000 - off;
-		if (off < 0x800 || (off < 0xC00 && !Mach64_Block1Enabled())) {
-			uint32_t v = 0;
-			const Bitu vaddr = 0x7FF000u + off;
-			for (unsigned int i = 0; i < len; i++)
-				v |= (uint32_t)((vaddr + i < vga.mem.memsize) ? vga.mem.linear[vaddr + i] : 0xFF) << (i * 8);
-			return v;
-		}
-		return Mach64_MMIORead(off - 0x800, len);
+		const uint32_t ap = (uint32_t)PAGING_GetPhysicalAddress(addr) & 0xFFFFFFu;
+		if (((ap & 0xFFFu) + len) > 0x1000) len = 0x1000 - (ap & 0xFFFu);
+		const int r = RegOffset(ap);
+		if (r >= 0) return Mach64_MMIORead((unsigned int)r, len);
+		uint32_t v = 0;
+		const Bitu vaddr = ap & 0x7FFFFFu;
+		for (unsigned int i = 0; i < len; i++)
+			v |= (uint32_t)((vaddr + i < vga.mem.memsize) ? vga.mem.linear[vaddr + i] : 0xFF) << (i * 8);
+		return v;
 	}
 	static void wr(PhysPt addr, uint32_t val, unsigned int len) {
-		const unsigned int off = (unsigned int)(PAGING_GetPhysicalAddress(addr) & 0xFFF);
-		if (off + len > 0x1000) len = 0x1000 - off;
-		if (off < 0x800 || (off < 0xC00 && !Mach64_Block1Enabled())) {
-			const Bitu vaddr = 0x7FF000u + off;
-			for (unsigned int i = 0; i < len; i++)
-				if (vaddr + i < vga.mem.memsize) vga.mem.linear[vaddr + i] = (uint8_t)(val >> (i * 8));
-			return;
-		}
-		Mach64_MMIOWrite(off - 0x800, val, len);
+		const uint32_t ap = (uint32_t)PAGING_GetPhysicalAddress(addr) & 0xFFFFFFu;
+		if (((ap & 0xFFFu) + len) > 0x1000) len = 0x1000 - (ap & 0xFFFu);
+		const int r = RegOffset(ap);
+		if (r >= 0) { Mach64_MMIOWrite((unsigned int)r, val, len); return; }
+		const Bitu vaddr = ap & 0x7FFFFFu;
+		for (unsigned int i = 0; i < len; i++)
+			if (vaddr + i < vga.mem.memsize) vga.mem.linear[vaddr + i] = (uint8_t)(val >> (i * 8));
 	}
 };
 
@@ -904,7 +968,12 @@ static Mach64_VGARegPage m64_vga_regs;
  * and the register window at BF800h. */
 void Mach64_SetupHandlers(void) {
 	if (!Mach64_Present()) return;
-	if (R(M64_CONFIG_CNTL) & 0x4) {
+	/* Not while the VGA maps B8000-BFFFF (text modes): the window would sit on
+	 * text memory, which the mode set clears in full. ATI's BIOS leaves the
+	 * window enabled and the Windows 9x driver uses it in mode 12h (A0000
+	 * 64K map); how the chip resolves the overlap in text modes is not
+	 * documented. */
+	if ((R(M64_CONFIG_CNTL) & 0x4) && ((vga.gfx.miscellaneous >> 2) & 3) != 3) {
 		PageHandler *cur = MEM_GetPageHandler(0xBF);
 		if (cur != &m64_vga_regs) m64_vga_regs.under = cur;
 		MEM_SetPageHandler(0xBF, 1, &m64_vga_regs);
@@ -1025,7 +1094,14 @@ void SVGA_Setup_Mach64(void) {
 /* PCI configuration space [RRG chapter 7]                                  */
 /* ---------------------------------------------------------------------- */
 
+uint8_t Mach64_PCI_ConfigRead_Inner(uint8_t regnum);
 uint8_t Mach64_PCI_ConfigRead(uint8_t regnum) {
+	const uint8_t v = Mach64_PCI_ConfigRead_Inner(regnum);
+	if (Mach64_Trace()) LOG_MSG("M64T PCI R %02x = %02x", regnum, v);
+	return v;
+}
+
+uint8_t Mach64_PCI_ConfigRead_Inner(uint8_t regnum) {
 	switch (regnum) {
 		case 0x00: return 0x02;                     /* vendor 1002h */
 		case 0x01: return 0x10;
@@ -1059,6 +1135,7 @@ uint8_t Mach64_PCI_ConfigRead(uint8_t regnum) {
 }
 
 void Mach64_PCI_ConfigWrite(uint8_t regnum, uint8_t val) {
+	if (Mach64_Trace()) LOG_MSG("M64T PCI W %02x = %02x", regnum, val);
 	switch (regnum) {
 		case 0x04:
 			if ((mach64.pci_command ^ val) & 0x3) {

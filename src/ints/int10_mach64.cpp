@@ -17,6 +17,8 @@
  *  points to the ROM table, whose word at +10h points to the clock table.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "dosbox.h"
@@ -25,6 +27,8 @@
 #include "inout.h"
 #include "callback.h"
 #include "regs.h"
+#include "cpu.h"
+#include "paging.h"
 #include "int10.h"
 #include "vga.h"
 #include "vga_mach64.h"
@@ -47,11 +51,35 @@ static const unsigned int ROMTABLE = 0xA2;
 static const unsigned int CLOCKTABLE = 0xC0;
 
 static Bitu mach64_rom_cb = 0;
+static uint16_t mach64_captable = 0;   /* ROM offset of the AL=07h table */
+
+/* set while the services run from the ROM entry point, which ATI's Windows
+ * driver calls directly from 16-bit protected mode */
+static bool mach64_via_rom = false;
 
 static Bitu Mach64_ROMServices_Callback(void) {
 	/* the same services as INT 10h AH=A0h; AL selects the function */
+	mach64_via_rom = true;
 	Mach64_INT10_Extended();
+	mach64_via_rom = false;
 	return CBRET_NONE;
+}
+
+/* A far pointer passed by the caller: segment:offset, or selector:offset
+ * from protected mode */
+static PhysPt Mach64_FarPtr(uint16_t seg, uint16_t off) {
+	if (cpu.pmode && !(reg_flags & FLAG_VM)) {
+		Descriptor desc;
+		if (!cpu.gdt.GetDescriptor(seg, desc)) return 0;
+		return (PhysPt)(desc.GetBase() + off);
+	}
+	return PhysMake(seg, off);
+}
+
+/* The segment (or selector) of the ROM for pointers returned to the caller:
+ * the ROM entry point runs in the caller's code segment for the ROM */
+static uint16_t Mach64_ROMSeg(void) {
+	return mach64_via_rom ? (uint16_t)SegValue(cs) : (uint16_t)0xC000;
 }
 
 void Mach64_SetupROM(uint32_t rom_base) {
@@ -87,6 +115,48 @@ void Mach64_SetupROM(uint32_t rom_base) {
 
 	/* SCRATCH_REG1: ROM segment location, (reg & 7Fh) * 80h + C000h [BK A-11] */
 	Mach64_IOWriteReg(M64_SCRATCH_REG1, 0);
+
+	/* CFG_MEM_VGA_AP_EN: the ATI BIOS leaves the registers mapped at
+	 * B000:F800-FFFF (the hardware default is off [RRG 5-3]); ATI's Windows 9x
+	 * driver polls FIFO_STAT there without enabling it */
+	Mach64_IOWriteReg(M64_CONFIG_CNTL, Mach64_IOReadReg(M64_CONFIG_CNTL) | 0x4);
+}
+
+/* Hardware capability list for AL=07h [PRG-215R3 A-5, BK A-13]: rows of
+ * H_DISP (characters), DACMASK (1 shl dactype), MEMREQ ((DRAM requirement shl
+ * 4) or VRAM requirement, in memory size codes), maximum dot clock in MHz and
+ * pixel width (colour depth code as in AL=00h CL), ending with H_DISP 0. The
+ * format type and the row length sit in the two bytes before the table.
+ * ATI_HAL.DLL takes the first row whose H_DISP is not below the mode's and
+ * then checks only the rows of that H_DISP, so the rows go from the narrowest
+ * mode up (the deepest colour first). Returns the bytes used. */
+static uint8_t MemCodeFor(uint32_t bytes) {
+	static const uint32_t kb[] = { 512, 1024, 2048, 4096, 6144, 8192 };
+	for (unsigned int i = 0; i < 6; i++) if (bytes <= kb[i] * 1024u) return (uint8_t)i;
+	return 0xF;
+}
+
+unsigned int Mach64_SetupCapabilityTable(uint32_t rom_base, unsigned int at) {
+	static const unsigned int widths[] = { 640, 800, 1024, 1280, 1600 };
+	static const unsigned int heights[] = { 480, 600, 768, 1024, 1200 };
+	static const struct { uint8_t code, bytespp; } depths[] = { { 6, 4 }, { 5, 3 }, { 4, 2 }, { 3, 2 }, { 2, 1 } };
+	unsigned int n = at;
+	phys_writeb(rom_base + n++, 0);        /* format type 0: DACMASK */
+	phys_writeb(rom_base + n++, 5);        /* bytes per row */
+	mach64_captable = (uint16_t)n;
+	for (unsigned int r = 0; r < 5; r++) {
+		for (const auto &d : depths) {
+			const uint8_t m = MemCodeFor(widths[r] * heights[r] * d.bytespp);
+			if (m == 0xF) continue;
+			phys_writeb(rom_base + n++, (uint8_t)(widths[r] / 8u));
+			phys_writeb(rom_base + n++, 0xFF);                 /* any DAC type */
+			phys_writeb(rom_base + n++, (uint8_t)((m << 4) | m));
+			phys_writeb(rom_base + n++, 135);                  /* PCLK_max_freq [RRG B-5] */
+			phys_writeb(rom_base + n++, d.code);
+		}
+	}
+	for (unsigned int i = 0; i < 5; i++) phys_writeb(rom_base + n++, 0);
+	return n - at;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -134,7 +204,22 @@ static void SetPixelClock(Bitu hz) {
 	Mach64_IOWriteReg(M64_CLOCK_CNTL, 3);                /* CLOCK_SEL 3, write disabled */
 }
 
+static void Mach64_DbgDriverVars(const char *why);
 void Mach64_INT10_SetMode(const VideoModeBlock *mode) {
+	if (getenv("DOSBOX_X_M64TRACE")) {
+		LOG_MSG("M64BIOS setmode %03x %ux%u type %d", (unsigned)mode->mode, (unsigned)mode->swidth, (unsigned)mode->sheight, (int)mode->type);
+		Mach64_DbgDriverVars("setmode");
+		extern void Mach64_CovDump(const char *why);
+		Mach64_CovDump("setmode");
+	}
+	if (mode->mode == 0x12 && getenv("DOSBOX_X_RAMDUMP")) {   /* TEST HOOK: guest RAM at each mode 12h set */
+		extern HostPt MemBase;
+		static unsigned int n = 0;
+		char fn[512];
+		snprintf(fn, sizeof(fn), "%s.%u", getenv("DOSBOX_X_RAMDUMP"), n++);
+		FILE *f = fopen(fn, "wb");
+		if (f) { fwrite(MemBase, 4096, MEM_TotalPages(), f); fclose(f); LOG_MSG("M64BIOS RAM dumped to %s", fn); }
+	}
 	const unsigned int pw = PixWidthOf(mode->type);
 	const bool ext = pw != 0 && mode->mode > 0x13;
 
@@ -234,11 +319,97 @@ unsigned int Mach64_INT10_GetBank(void) {
 /* Extended ROM services [BK A-11..A-17]                                    */
 /* ---------------------------------------------------------------------- */
 
-/* resolution codes (AL=0, CH) */
-struct Mach64_Res { uint8_t code; uint16_t w, h; };
-static const Mach64_Res mach64_res[] = {
-	{ 0x12, 640, 480 }, { 0x6A, 800, 600 }, { 0x55, 1024, 768 }, { 0x83, 1280, 1024 }, { 0x84, 1600, 1200 }
+/* Resolution codes (AL=0, CH) and the CRTC timings the mode tables report
+ * (VESA DMT 60 Hz timings; [BK A-20] mode table layout). Horizontal values
+ * in pixels, vertical in lines, dot clock in 10 kHz. */
+struct Mach64_Res {
+	uint8_t code; uint16_t w, h;
+	uint16_t htotal, hss, hsw, vtotal, vss, vsw, clock;
+	bool hneg, vneg;
 };
+static const Mach64_Res mach64_res[] = {
+	{ 0x12,  640,  480,  800,  656,  96,  525,  490, 2,  2518, true,  true  },
+	{ 0x6A,  800,  600, 1056,  840, 128,  628,  601, 4,  4000, false, false },
+	{ 0x55, 1024,  768, 1344, 1048, 136,  806,  771, 6,  6500, true,  true  },
+	{ 0x83, 1280, 1024, 1688, 1328, 112, 1066, 1025, 3, 10800, false, false },
+};
+
+/* A000h: program the accelerator CRTC [PRG-215R3 A-2] from the built-in
+ * timings (CH = resolution code) or from a table in the caller's memory
+ * (CH = 81h): the mode table layout of AL=09h [BK A-20] from its offset 8 on,
+ * CRTC_H_TOTAL at +06h (as ATI_HAL.DLL passes it). CL[3:0] is the
+ * pixel depth (the CRTC_PIX_WIDTH codes), CL[4] the 8-bit DAC, CL[7:6] the
+ * pitch: 0 = 1024, 1 = unchanged, 2 = the display width. The display stays
+ * as it is until AL=01h. */
+static bool Mach64_BIOSTrace(void);
+static bool Mach64_LoadCRTC(uint8_t ch, uint8_t cl, PhysPt table) {
+	const unsigned int depth = cl & 0xF;
+	if (depth < M64_PIX_4BPP || depth > M64_PIX_32BPP) return false;
+	unsigned int ht, hd, hss, hsw, vt, vd, vss, vsw, hdly = 0;
+	uint16_t flags = 0;
+	uint32_t clock_10k;
+	if (ch == 0x81) {
+		if (!table) return false;
+		table -= 8;                 /* read it with the mode table offsets */
+		if (Mach64_BIOSTrace()) {
+			char hex[100]; size_t n = 0;
+			for (unsigned int i = 8; i < 0x24; i++) n += (size_t)snprintf(hex + n, sizeof(hex) - n, "%02x", (unsigned)mem_readb(table + i));
+			LOG_MSG("M64BIOS A000 table %s", hex);
+		}
+		flags = mem_readw(table + 0x0C);
+		ht = mem_readb(table + 0x0E); hd = mem_readb(table + 0x0F);
+		hss = mem_readb(table + 0x10); hsw = mem_readb(table + 0x11);
+		vt = mem_readw(table + 0x12); vd = mem_readw(table + 0x14);
+		vss = mem_readw(table + 0x16); vsw = mem_readb(table + 0x18);
+		clock_10k = mem_readw(table + 0x1A);
+		hdly = (mem_readw(table + 0x1C) >> 8) & 7;
+	}
+	else {
+		const Mach64_Res *r = NULL;
+		for (const auto &x : mach64_res) if (x.code == ch) r = &x;
+		if (!r) return false;
+		ht = r->htotal / 8 - 1; hd = r->w / 8 - 1; hss = r->hss / 8 - 1;
+		hsw = (r->hsw / 8) | (r->hneg ? 0x20 : 0);
+		vt = r->vtotal - 1u; vd = r->h - 1u; vss = r->vss - 1u;
+		vsw = r->vsw | (r->vneg ? 0x20 : 0);
+		clock_10k = r->clock;
+	}
+	if (hd == 0 || vd == 0 || ht < hd || vt < vd) return false;
+
+	uint32_t gen = Mach64_IOReadReg(M64_CRTC_GEN_CNTL);
+	Mach64_IOWriteReg(M64_CRTC_GEN_CNTL, gen | M64_CRTC_DISPLAY_DIS);
+	Mach64_IOWriteReg(M64_CRTC_H_TOTAL_DISP, (hd << 16) | ht);
+	Mach64_IOWriteReg(M64_CRTC_H_SYNC_STRT_WID, (hss & 0xFF) | (hdly << 8) | ((hsw & 0x1F) << 16) | ((hsw & 0x20) ? (1u << 21) : 0));
+	Mach64_IOWriteReg(M64_CRTC_V_TOTAL_DISP, (vd << 16) | vt);
+	Mach64_IOWriteReg(M64_CRTC_V_SYNC_STRT_WID, vss | ((vsw & 0x1F) << 16) | ((vsw & 0x20) ? (1u << 21) : 0));
+	Mach64_IOWriteReg(M64_OVR_WID_LEFT_RIGHT, 0);
+	Mach64_IOWriteReg(M64_OVR_WID_TOP_BOTTOM, 0);
+
+	const unsigned int pitchsel = (cl >> 6) & 3;
+	if (pitchsel != 1) {
+		const uint32_t pitch_px = (pitchsel == 0) ? 1024u : (hd + 1u) * 8u;
+		Mach64_IOWriteReg(M64_CRTC_OFF_PITCH, ((pitch_px / 8u) & 0x3FF) << 22);
+	}
+	if (clock_10k) SetPixelClock((Bitu)clock_10k * 10000u);
+	if (cl & 0x10) Mach64_IOWriteReg(M64_DAC_CNTL, Mach64_IOReadReg(M64_DAC_CNTL) | (1u << 8));
+
+	gen &= ~(0x700u | M64_CRTC_DBL_SCAN_EN | M64_CRTC_INTERLACE_EN | M64_CRTC_DISPLAY_DIS);
+	gen |= (depth << 8) | M64_CRTC_ENABLE;
+	if (flags & 0x100) gen |= M64_CRTC_DBL_SCAN_EN;
+	if (flags & 0x200) gen |= M64_CRTC_INTERLACE_EN;
+	Mach64_IOWriteReg(M64_CRTC_GEN_CNTL, gen);
+	return true;
+}
+
+/* AL=01h: accelerator (coprocessor) or VGA display, and the DAC width */
+static void Mach64_SetDisplay(bool coprocessor, bool dac8) {
+	uint32_t gen = Mach64_IOReadReg(M64_CRTC_GEN_CNTL);
+	if (coprocessor) gen |= M64_CRTC_EXT_DISP_EN | M64_CRTC_ENABLE;
+	else gen &= ~M64_CRTC_EXT_DISP_EN;
+	Mach64_IOWriteReg(M64_CRTC_GEN_CNTL, gen);
+	const uint32_t dac = Mach64_IOReadReg(M64_DAC_CNTL);
+	Mach64_IOWriteReg(M64_DAC_CNTL, (coprocessor && dac8) ? (dac | (1u << 8)) : (dac & ~(1u << 8)));
+}
 
 static VGAModes ModeTypeOfDepth(unsigned int cl) {
 	switch (cl & 0xF) {
@@ -298,11 +469,28 @@ static void BuildQuery(PhysPt buf, bool with_modes, unsigned int &size) {
 	uint32_t iobase = (mach64.pci_cfg40 & 4) ? (mach64.pci_io_base & 0xFF00) : 0x2EC;
 	mem_writew(buf + 0x18, (uint16_t)iobase);
 	for (unsigned int m = 0; m < nmodes; m++) {
+		const Mach64_Res &r = mach64_res[m];
 		const PhysPt t = buf + 0x20 + m * 0x24;
-		mem_writew(t + 0, mach64_res[m].w);
-		mem_writew(t + 2, mach64_res[m].h);
-		mem_writeb(t + 4, 6);                        /* maximum depth: 32 bpp */
-		mem_writeb(t + 5, mach64_res[m].code);
+		/* deepest colour that fits in video memory */
+		uint8_t depth = 6;
+		static const unsigned int bytespp[7] = { 0, 1, 1, 2, 2, 3, 4 };
+		while (depth > 2 && (uint32_t)r.w * r.h * bytespp[depth] > vga.mem.memsize) depth--;
+		mem_writew(t + 0x00, r.w);
+		mem_writew(t + 0x02, r.h);
+		mem_writeb(t + 0x04, depth);
+		mem_writeb(t + 0x05, r.code);
+		mem_writew(t + 0x06, 0);                     /* not from the EEPROM */
+		mem_writew(t + 0x0C, 0);                     /* no interlace, double scan, ... */
+		mem_writeb(t + 0x0E, (uint8_t)(r.htotal / 8 - 1));       /* CRTC_H_TOTAL */
+		mem_writeb(t + 0x0F, (uint8_t)(r.w / 8 - 1));            /* CRTC_H_DISP */
+		mem_writeb(t + 0x10, (uint8_t)(r.hss / 8 - 1));          /* CRTC_H_SYNC_STRT */
+		mem_writeb(t + 0x11, (uint8_t)((r.hsw / 8) | (r.hneg ? 0x20 : 0))); /* CRTC_H_SYNC_WID, _POL */
+		mem_writew(t + 0x12, (uint16_t)(r.vtotal - 1));          /* CRTC_V_TOTAL */
+		mem_writew(t + 0x14, (uint16_t)(r.h - 1));               /* CRTC_V_DISP */
+		mem_writew(t + 0x16, (uint16_t)(r.vss - 1));             /* CRTC_V_SYNC_STRT */
+		mem_writeb(t + 0x18, (uint8_t)(r.vsw | (r.vneg ? 0x20 : 0))); /* CRTC_V_SYNC_WID, _POL */
+		mem_writeb(t + 0x19, 3);                     /* CLOCK_CNTL: the programmable clock */
+		mem_writew(t + 0x1A, r.clock);
 	}
 }
 
@@ -315,31 +503,103 @@ static bool FindMode(unsigned int w, unsigned int h, VGAModes type, Bitu &modenu
 	return false;
 }
 
+/* TEST HOOK (not for upstream): log the BIOS calls while DOSBOX_X_M64TRACE is set */
+static bool Mach64_BIOSTrace(void) {
+	static int on = -1;
+	if (on < 0) on = getenv("DOSBOX_X_M64TRACE") != NULL;
+	return on != 0;
+}
+
+/* TEST HOOK: ati_m64.drv's data segment, from its A009h buffer at DS:3FF8h */
+static PhysPt m64_dbg_ds = 0;
+/* linear to physical through the guest page tables, without faulting */
+static bool Mach64_DbgLinToPhys(PhysPt lin, uint32_t &phys) {
+	if (!paging.enabled) { phys = lin; return true; }
+	const uint32_t pde = phys_readd((paging.cr3 & 0xFFFFF000u) + ((lin >> 22) << 2));
+	if (!(pde & 1)) return false;
+	if (pde & 0x80) { phys = (pde & 0xFFC00000u) | (lin & 0x3FFFFFu); return true; }
+	const uint32_t pte = phys_readd((pde & 0xFFFFF000u) + (((lin >> 12) & 0x3FF) << 2));
+	if (!(pte & 1)) return false;
+	phys = (pte & 0xFFFFF000u) | (lin & 0xFFFu);
+	return true;
+}
+static uint32_t Mach64_DbgRead(PhysPt lin, unsigned int len) {
+	uint32_t v = 0;
+	for (unsigned int i = 0; i < len; i++) {
+		uint32_t p;
+		if (!Mach64_DbgLinToPhys(lin + i, p)) return 0xDEADDEAD;
+		v |= (uint32_t)phys_readb(p) << (8 * i);
+	}
+	return v;
+}
+static void Mach64_DbgDriverVars(const char *why) {
+	if (!Mach64_BIOSTrace() || m64_dbg_ds == 0) return;
+	static const uint16_t offs[] = { 0x2831, 0x2b32, 0x2b34, 0x2b36, 0x27fb, 0x27fd, 0x27ff, 0x2a68, 0x2992, 0x2b93, 0x2b95, 0x2b4b, 0x4003, 0x4bbc, 0x3e07, 0x2b68 };
+	char buf[512]; size_t n = 0;
+	for (auto o : offs) n += (size_t)snprintf(buf + n, sizeof(buf) - n, " [%04x]=%04x", o, (unsigned)Mach64_DbgRead(m64_dbg_ds + o, 2));
+	LOG_MSG("M64DRV %s ds=%08x%s [3dca]=%08x", why, (unsigned)m64_dbg_ds, buf, (unsigned)Mach64_DbgRead(m64_dbg_ds + 0x3dca, 4));
+}
+
 void Mach64_INT10_Extended(void) {
 	const uint8_t fn = reg_al;
+	if (Mach64_BIOSTrace()) {
+		const PhysPt stk = (PhysPt)SegPhys(ss) + (cpu.stack.big ? reg_esp : reg_sp);
+		LOG_MSG("M64BIOS A0%02X bx=%04x cx=%04x dx=%04x%s cs=%04x:%04x ds=%04x ret=%04x:%04x", fn, (unsigned)reg_bx, (unsigned)reg_cx, (unsigned)reg_dx,
+			mach64_via_rom ? " (ROM entry)" : "", (unsigned)SegValue(cs), (unsigned)reg_ip, (unsigned)SegValue(ds),
+			mach64_via_rom ? (unsigned)Mach64_DbgRead(stk + 2, 2) : 0u, mach64_via_rom ? (unsigned)Mach64_DbgRead(stk, 2) : 0u);
+		Mach64_DbgDriverVars("call");
+		static bool dumped = false;
+		if (mach64_via_rom && !dumped) {
+			dumped = true;
+			const uint16_t rcs = (uint16_t)Mach64_DbgRead(stk + 2, 2), rip = (uint16_t)Mach64_DbgRead(stk, 2);
+			Descriptor desc;
+			if (cpu.gdt.GetDescriptor(rcs, desc)) {
+				char hex[200]; size_t n = 0;
+				for (int i = -48; i < 16; i++) n += (size_t)snprintf(hex + n, sizeof(hex) - n, "%02x", (unsigned)(Mach64_DbgRead((PhysPt)desc.GetBase() + (uint16_t)(rip + i), 1) & 0xFF));
+				LOG_MSG("M64DRV caller code base %08x limit %x bytes[-48..16] %s", (unsigned)desc.GetBase(), (unsigned)desc.GetLimit(), hex);
+			}
+			if (cpu.gdt.GetDescriptor(SegValue(ds), desc)) {
+				char hex[200]; size_t n = 0;
+				for (int i = 0; i < 64; i++) n += (size_t)snprintf(hex + n, sizeof(hex) - n, "%02x", (unsigned)(Mach64_DbgRead((PhysPt)desc.GetBase() + i, 1) & 0xFF));
+				LOG_MSG("M64DRV caller ds base %08x limit %x bytes[0..64] %s", (unsigned)desc.GetBase(), (unsigned)desc.GetLimit(), hex);
+			}
+		}
+		if (mach64_via_rom && m64_dbg_ds == 0 && fn == 0x09) {
+			/* the driver calls with its own DS loaded: check for " 761295520" at DS:29EEh */
+			const PhysPt dsb = (PhysPt)SegPhys(ds);
+			LOG_MSG("M64DRV A009 caller ds=%04x base %08x, sig %08x", (unsigned)SegValue(ds), (unsigned)dsb, (unsigned)Mach64_DbgRead(dsb + 0x29ee, 4));
+			if (Mach64_DbgRead(dsb + 0x29ee, 4) == 0x31363720u) m64_dbg_ds = dsb;
+		}
+	}
 	switch (fn) {
-		case 0x00:   /* load coprocessor CRTC parameters */
+		case 0x00: { /* load coprocessor CRTC parameters */
+			const PhysPt table = (reg_ch == 0x81) ? Mach64_FarPtr(reg_dx, reg_bx) : 0;
+			reg_ah = Mach64_LoadCRTC(reg_ch, reg_cl, table) ? 0 : 1;
+			break;
+		}
 		case 0x02: { /* ... and set the display mode */
+			if (reg_ch == 0x81 || reg_ch == 0x80) {
+				const PhysPt table = (reg_ch == 0x81) ? Mach64_FarPtr(reg_dx, reg_bx) : 0;
+				if (!Mach64_LoadCRTC(reg_ch, reg_cl, table)) { reg_ah = 1; break; }
+				Mach64_SetDisplay(true, (reg_cl & 0x10) != 0);
+				reg_cl &= ~0x20;
+				reg_ah = 0;
+				break;
+			}
+			/* a built-in mode: the VBE mode of the same resolution and depth, so
+			 * that the rest of the BIOS knows about it */
 			unsigned int w = 0, h = 0;
 			for (const auto &r : mach64_res) if (r.code == reg_ch) { w = r.w; h = r.h; }
 			const VGAModes t = ModeTypeOfDepth(reg_cl);
 			Bitu modenum;
 			if (w == 0 || t == M_ERROR || !FindMode(w, h, t, modenum)) { reg_ah = 1; break; }
-			if (fn == 0x02) {
-				if (!INT10_SetVideoMode((uint16_t)modenum)) { reg_ah = 1; break; }
-			}
+			if (!INT10_SetVideoMode((uint16_t)modenum)) { reg_ah = 1; break; }
 			reg_ah = 0;
 			break;
 		}
-		case 0x01:   /* set display mode: CL bit 0 = coprocessor */
-			if (reg_cl & 1) {
-				Mach64_IOWriteReg(M64_CRTC_GEN_CNTL, Mach64_IOReadReg(M64_CRTC_GEN_CNTL) | M64_CRTC_EXT_DISP_EN | M64_CRTC_ENABLE);
-				if (reg_cl & 0x80) Mach64_IOWriteReg(M64_DAC_CNTL, Mach64_IOReadReg(M64_DAC_CNTL) | (1u << 8));
-			}
-			else {
-				Mach64_IOWriteReg(M64_CRTC_GEN_CNTL, Mach64_IOReadReg(M64_CRTC_GEN_CNTL) & ~M64_CRTC_EXT_DISP_EN);
-				Mach64_IOWriteReg(M64_DAC_CNTL, Mach64_IOReadReg(M64_DAC_CNTL) & ~(1u << 8));
-			}
+		case 0x01:   /* set display mode: CL bit 0 = coprocessor, bit 7 = 8-bit DAC */
+			Mach64_SetDisplay((reg_cl & 1) != 0, (reg_cl & 0x80) != 0);
+			reg_cl &= ~0x20;                         /* CRTC parameters not doubled */
 			reg_ah = 0;
 			break;
 		case 0x03:   /* read EEPROM: no EEPROM contents */
@@ -361,8 +621,12 @@ void Mach64_INT10_Extended(void) {
 			reg_ah = 0;
 			break;
 		}
-		case 0x07:   /* hardware capability list: empty table */
-			reg_ah = 2;
+		case 0x07:   /* hardware capability list */
+			if (mach64_captable == 0) { reg_ah = 2; break; }
+			reg_dx = Mach64_ROMSeg();
+			reg_bx = mach64_captable;
+			reg_al = 0;
+			reg_ah = 0;
 			break;
 		case 0x08: { /* size of the query structure */
 			unsigned int size;
@@ -373,13 +637,15 @@ void Mach64_INT10_Extended(void) {
 		}
 		case 0x09: { /* query device into DX:BX */
 			unsigned int size;
-			BuildQuery(PhysMake(reg_dx, reg_bx), (reg_cl & 1) != 0, size);
+			const PhysPt buf = Mach64_FarPtr(reg_dx, reg_bx);
+			if (buf == 0) { reg_ah = 1; break; }
+			BuildQuery(buf, (reg_cl & 1) != 0, size);
 			reg_ah = 0;
 			break;
 		}
 		case 0x0A:   /* clock chip frequency table */
 			reg_al = 4;                              /* internal PLL */
-			reg_dx = 0xC000;
+			reg_dx = Mach64_ROMSeg();
 			reg_bx = 0x0000;                         /* no fixed frequency table */
 			reg_cx = (uint16_t)CLOCKTABLE;
 			reg_ah = 0;

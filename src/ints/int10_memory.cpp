@@ -377,6 +377,8 @@ void INT10_SetupRomMemory(void) {
 							 *      drivers read (ROM offset 48h) and the extended services entry point
 							 *      (ROM offset 64h) are set up by Mach64_SetupROM. */
 							phys_writeb(rom_base+0x43,0x40);
+							/* ATI's Windows 9x driver (ati_m64.drv) searches the ROM for " 761295520" */
+							phys_writeb(rom_base+0x30,' ');
 							extern void Mach64_SetupROM(PhysPt rom_base);
 							Mach64_SetupROM(rom_base);
 							break;
@@ -567,6 +569,11 @@ void INT10_SetupRomMemory(void) {
 		phys_writed(rom_base+int10.rom.used,0);		int10.rom.used+=4;
 	}
 	
+	if (IS_VGA_ARCH && svgaCard==SVGA_ATI && atiCard==ATI_Mach64GT) {
+		extern unsigned int Mach64_SetupCapabilityTable(uint32_t rom_base, unsigned int at);
+		int10.rom.used += (uint16_t)Mach64_SetupCapabilityTable(rom_base, int10.rom.used);
+	}
+
 	INT10_SetupRomMemoryChecksum();
 
 	if (IS_TANDY_ARCH) {

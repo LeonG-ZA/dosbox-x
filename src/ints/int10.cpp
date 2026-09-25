@@ -817,6 +817,8 @@ CX	640x480	800x600	  1024x768/1280x1024
 			break;
 		if (vga.dosboxig.vesa_bios_lockout)
 			break;
+		if (Mach64_Present() && getenv("DOSBOX_X_M64TRACE")) /* TEST HOOK (not for upstream) */
+			LOG_MSG("M64BIOS VBE %02X bx=%04x cx=%04x dx=%04x", (unsigned)reg_al, (unsigned)reg_bx, (unsigned)reg_cx, (unsigned)reg_dx);
 
 		switch (reg_al) {
 		case 0x00:							/* Get SVGA Information */
