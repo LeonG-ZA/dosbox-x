@@ -38,18 +38,23 @@ extern void Mach64_WritePixel(uint32_t addr, int sz, uint32_t v);
 /* Interpolator state                                                       */
 /* ---------------------------------------------------------------------- */
 
-/* colour and alpha: S.8.12; Z: S.16.12 [RRG 6-12..6-14]. Kept in 64 bits
- * with 12 fractional bits. Texture S/T: START 10.11, first derivatives
- * S.11.16, second derivatives S.10.16 [RRG 6-8..6-10]; kept with 16
- * fractional bits. */
+/* Field positions from the register diagrams [RRG 6-8..6-14]:
+ *   RED/GREEN/BLUE/ALPHA START, X_INC, Y_INC: S.8.12 in bits 24:4, so the
+ *     integer colour sits at bit 16 of the register image
+ *   Z START, X_INC, Y_INC: S.16.12 in bits 28:0 (integer at bit 12)
+ *   S/T START: 10.11 in bits 25:5; XINC_START and Y_INC: S.11.16 in 27:0;
+ *     X_INC2, Y_INC2, XY_INC2: S.10.16 in 26:0 - all with the binary point
+ *     at bit 16 of the register image, 1024.0 being one wrap of the map
+ * Everything is kept in these register units (64-bit, sign extended), and is
+ * written back when the trapezoid ends. */
 struct Interp {
 	int64_t v, xinc, yinc;
 };
 
 struct TexCoord {
-	int64_t v;       /* coordinate */
-	int64_t dx;      /* current X increment (S_X_INC) */
-	int64_t dy;      /* current Y increment (S_Y_INC) */
+	int64_t v;       /* coordinate on the leading edge */
+	int64_t dx;      /* current S_X_INC */
+	int64_t dy;      /* current S_Y_INC */
 	int64_t dxx, dyy, dxy; /* second derivatives */
 };
 
@@ -60,78 +65,107 @@ static struct {
 	/* along the span */
 	int64_t sr, sg, sb, sa, sz;
 	int64_t srx, sgx, sbx, sax, szx;
-	int64_t ss, sdsx, st, sdtx;
-	int64_t dsxx, dtxx;
-	bool span_fwd;
-	int span_pix;
-	unsigned int dither_row;
+	int64_t ss, sdsx, st, sdtx;     /* S/T and their per-pixel steps */
+	int64_t sdsy, sdty;             /* S_Y_INC at the pixel, for the level of detail */
+	int64_t sdxy_step, tdxy_step;
+	int32_t dir;                    /* DST_X_DIR as +1/-1 */
 } P;
 
-static int64_t sx12(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
+static inline int64_t sx(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
 
 void Mach64_3D_TrapBegin(void) {
-	/* S.8.12 in 21 bits; S.16.12 in 29 bits */
-	P.r.v = sx12(M64_RED_START, 21);   P.r.xinc = sx12(M64_RED_X_INC, 21);   P.r.yinc = sx12(M64_RED_Y_INC, 21);
-	P.g.v = sx12(M64_GREEN_START, 21); P.g.xinc = sx12(M64_GREEN_X_INC, 21); P.g.yinc = sx12(M64_GREEN_Y_INC, 21);
-	P.b.v = sx12(M64_BLUE_START, 21);  P.b.xinc = sx12(M64_BLUE_X_INC, 21);  P.b.yinc = sx12(M64_BLUE_Y_INC, 21);
-	P.a.v = sx12(M64_ALPHA_START, 21); P.a.xinc = sx12(M64_ALPHA_X_INC, 21); P.a.yinc = sx12(M64_ALPHA_Y_INC, 21);
-	P.z.v = sx12(M64_Z_START, 29);     P.z.xinc = sx12(M64_Z_X_INC, 29);     P.z.yinc = sx12(M64_Z_Y_INC, 29);
+	P.r.v = sx(M64_RED_START, 25);   P.r.xinc = sx(M64_RED_X_INC, 25);   P.r.yinc = sx(M64_RED_Y_INC, 25);
+	P.g.v = sx(M64_GREEN_START, 25); P.g.xinc = sx(M64_GREEN_X_INC, 25); P.g.yinc = sx(M64_GREEN_Y_INC, 25);
+	P.b.v = sx(M64_BLUE_START, 25);  P.b.xinc = sx(M64_BLUE_X_INC, 25);  P.b.yinc = sx(M64_BLUE_Y_INC, 25);
+	P.a.v = sx(M64_ALPHA_START, 25); P.a.xinc = sx(M64_ALPHA_X_INC, 25); P.a.yinc = sx(M64_ALPHA_Y_INC, 25);
+	P.z.v = sx(M64_Z_START, 29);     P.z.xinc = sx(M64_Z_X_INC, 29);     P.z.yinc = sx(M64_Z_Y_INC, 29);
 
-	/* S_START is 10.11: convert to 16 fractional bits */
-	P.s.v   = (int64_t)(R(M64_S_START) & 0x1FFFFF) << 5;
-	P.s.dx  = sext(R(M64_S_XINC_START), 28);
-	P.s.dy  = sext(R(M64_S_Y_INC), 28);
-	P.s.dxx = sext(R(M64_S_X_INC2), 27);
-	P.s.dyy = sext(R(M64_S_Y_INC2), 27);
-	P.s.dxy = sext(R(M64_S_XY_INC2), 27);
-	P.t.v   = (int64_t)(R(M64_T_START) & 0x1FFFFF) << 5;
-	P.t.dx  = sext(R(M64_T_XINC_START), 28);
-	P.t.dy  = sext(R(M64_T_Y_INC), 28);
-	P.t.dxx = sext(R(M64_T_X_INC2), 27);
-	P.t.dyy = sext(R(M64_T_Y_INC2), 27);
-	P.t.dxy = sext(R(M64_T_XY_INC2), 27);
-	P.dither_row = (unsigned int)(R(M64_DST_Y) & 3);
+	P.s.v   = sx(M64_S_START, 26);
+	P.s.dx  = sx(M64_S_XINC_START, 28);
+	P.s.dy  = sx(M64_S_Y_INC, 28);
+	P.s.dxx = sx(M64_S_X_INC2, 27);
+	P.s.dyy = sx(M64_S_Y_INC2, 27);
+	P.s.dxy = sx(M64_S_XY_INC2, 27);
+	P.t.v   = sx(M64_T_START, 26);
+	P.t.dx  = sx(M64_T_XINC_START, 28);
+	P.t.dy  = sx(M64_T_Y_INC, 28);
+	P.t.dxx = sx(M64_T_X_INC2, 27);
+	P.t.dyy = sx(M64_T_Y_INC2, 27);
+	P.t.dxy = sx(M64_T_XY_INC2, 27);
 }
 
-/* The leading edge moved one pixel in DST_X_DIR */
+/* The trajectory registers are live: store where the next trapezoid of the
+ * same triangle continues. */
+void Mach64_3D_TrapEnd(void) {
+	auto put = [](unsigned int reg, int64_t v, uint32_t fieldmask) {
+		mach64.reg[reg] = (uint32_t)v & fieldmask;
+	};
+	put(M64_RED_START, P.r.v, 0x01FFFFFF);
+	put(M64_GREEN_START, P.g.v, 0x01FFFFFF);
+	put(M64_BLUE_START, P.b.v, 0x01FFFFFF);
+	put(M64_ALPHA_START, P.a.v, 0x01FFFFFF);
+	put(M64_Z_START, P.z.v, 0x1FFFFFFF);
+	put(M64_S_START, P.s.v, 0x03FFFFFF);
+	put(M64_S_XINC_START, P.s.dx, 0x0FFFFFFF);
+	put(M64_S_Y_INC, P.s.dy, 0x0FFFFFFF);
+	put(M64_SCALE_Y_PITCH, P.s.dy, 0x0FFFFFFF);   /* the same register */
+	put(M64_T_START, P.t.v, 0x03FFFFFF);
+	put(M64_T_XINC_START, P.t.dx, 0x0FFFFFFF);
+	put(M64_T_Y_INC, P.t.dy, 0x0FFFFFFF);
+}
+
+/* The leading edge moved one pixel in DST_X_DIR. X_INC2 is the change of
+ * S_X_INC per X step; the mixed term also changes S_Y_INC (the quadratic's
+ * cross term is shared). */
 void Mach64_3D_EdgeStepX(void) {
 	P.r.v += P.r.xinc; P.g.v += P.g.xinc; P.b.v += P.b.xinc; P.a.v += P.a.xinc; P.z.v += P.z.xinc;
-	/* ASSUMPTION: a step in X along the edge advances S by the current X
-	 * increment and applies X_INC2 to it, and the mixed term to the Y increment */
 	P.s.v += P.s.dx; P.s.dx += P.s.dxx; P.s.dy += P.s.dxy;
 	P.t.v += P.t.dx; P.t.dx += P.t.dxx; P.t.dy += P.t.dxy;
 }
 
-/* The leading edge moved to the next scan line */
+/* The leading edge moved to the next scan line: S_Y_INC2 changes S_Y_INC,
+ * S_XY_INC2 changes S_X_INC [RRG 6-8]. */
 void Mach64_3D_EdgeStepY(void) {
 	P.r.v += P.r.yinc; P.g.v += P.g.yinc; P.b.v += P.b.yinc; P.a.v += P.a.yinc; P.z.v += P.z.yinc;
-	/* S_Y_INC2: change of S_Y_INC per Y step; S_XY_INC2: change of S_X_INC per Y step [RRG 6-8] */
 	P.s.v += P.s.dy; P.s.dy += P.s.dyy; P.s.dx += P.s.dxy;
 	P.t.v += P.t.dy; P.t.dy += P.t.dyy; P.t.dx += P.t.dxy;
-	P.dither_row++;
 }
 
-/* Start of a span. with_dst_dir: the span walks in DST_X_DIR (the X
- * increments apply as they are), otherwise against it. */
-void Mach64_3D_SpanBegin(bool with_dst_dir) {
-	P.span_fwd = with_dst_dir;
-	const int64_t sgn = with_dst_dir ? 1 : -1;
-	P.sr = P.r.v; P.sg = P.g.v; P.sb = P.b.v; P.sa = P.a.v; P.sz = P.z.v;
-	P.srx = P.r.xinc * sgn; P.sgx = P.g.xinc * sgn; P.sbx = P.b.xinc * sgn; P.sax = P.a.xinc * sgn; P.szx = P.z.xinc * sgn;
-	P.ss = P.s.v; P.sdsx = P.s.dx * sgn; P.dsxx = P.s.dxx;
-	P.st = P.t.v; P.sdtx = P.t.dx * sgn; P.dtxx = P.t.dxx;
-	P.span_pix = 0;
+/* S at n X steps from the leading edge, and the step from there to the
+ * next pixel in screen order (dir = DST_X_DIR, +1 or -1) */
+static inline int64_t QuadAt(int64_t start, int64_t inc, int64_t inc2, int64_t n) {
+	return start + n * inc + ((n * (n - 1)) / 2) * inc2;
+}
+static inline int64_t QuadStep(int64_t inc, int64_t inc2, int64_t n, int32_t dir) {
+	return dir > 0 ? inc + n * inc2 : -inc - (n - 1) * inc2;
+}
+
+/* Start of a span at the pixel n steps from the leading edge in DST_X_DIR;
+ * the span then walks left to right on the screen. */
+void Mach64_3D_SpanBegin(int32_t n, int32_t dir) {
+	P.dir = dir;
+	P.sr = P.r.v + P.r.xinc * n; P.srx = P.r.xinc * dir;
+	P.sg = P.g.v + P.g.xinc * n; P.sgx = P.g.xinc * dir;
+	P.sb = P.b.v + P.b.xinc * n; P.sbx = P.b.xinc * dir;
+	P.sa = P.a.v + P.a.xinc * n; P.sax = P.a.xinc * dir;
+	P.sz = P.z.v + P.z.xinc * n; P.szx = P.z.xinc * dir;
+	P.ss = QuadAt(P.s.v, P.s.dx, P.s.dxx, n); P.sdsx = QuadStep(P.s.dx, P.s.dxx, n, dir);
+	P.st = QuadAt(P.t.v, P.t.dx, P.t.dxx, n); P.sdtx = QuadStep(P.t.dx, P.t.dxx, n, dir);
+	P.sdsy = P.s.dy + (int64_t)n * P.s.dxy;
+	P.sdty = P.t.dy + (int64_t)n * P.t.dxy;
 }
 
 void Mach64_3D_SpanStep(void) {
 	P.sr += P.srx; P.sg += P.sgx; P.sb += P.sbx; P.sa += P.sax; P.sz += P.szx;
-	P.ss += P.sdsx; P.sdsx += P.span_fwd ? P.dsxx : -P.dsxx;
-	P.st += P.sdtx; P.sdtx += P.span_fwd ? P.dtxx : -P.dtxx;
-	P.span_pix++;
+	P.ss += P.sdsx; P.sdsx += P.s.dxx;
+	P.st += P.sdtx; P.sdtx += P.t.dxx;
+	P.sdsy += P.s.dxy * P.dir;
+	P.sdty += P.t.dxy * P.dir;
 }
 
-static inline int Clamp8(int64_t v12) {
-	const int64_t v = v12 >> 12;
+/* colour interpolator (register units) to 8 bits */
+static inline int Clamp8(int64_t v) {
+	v >>= 16;
 	return v < 0 ? 0 : (v > 255 ? 255 : (int)v);
 }
 
@@ -308,7 +342,7 @@ static ARGB SampleTexture(void) {
 	if (mip && maxsize > 0) {
 		const double scale = (double)(1u << maxsize) / (double)(1u << TEX_COORD_BITS) / 65536.0;
 		const double dsx = fabs((double)P.sdsx) * scale, dtx = fabs((double)P.sdtx) * scale;
-		const double dsy = fabs((double)P.s.dy) * scale, dty = fabs((double)P.t.dy) * scale;
+		const double dsy = fabs((double)P.sdsy) * scale, dty = fabs((double)P.sdty) * scale;
 		double rho = dsx > dtx ? dsx : dtx;
 		if (dsy > rho) rho = dsy;
 		if (dty > rho) rho = dty;
@@ -469,13 +503,13 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 
 		/* colour key on the texel (CLR_CMP_SRC 2 [RRG 4-100]) */
 		const uint32_t ccc = R(M64_CLR_CMP_CNTL);
-		if (((ccc >> 24) & 3) == 2 && (ccc & 7) >= 4) {
+		if (((ccc >> 24) & 3) == 2 && ((ccc & 7) >= 4 || (ccc & 7) == 1)) {
 			/* ASSUMPTION: the key is compared against the texel as 8:8:8 RGB */
 			const uint32_t msk = R(M64_CLR_CMP_MSK);
 			const uint32_t key = R(M64_CLR_CMP_CLR) & msk;
 			const uint32_t tv = (uint32_t)((t.r << 16) | (t.g << 8) | t.b) & msk;
 			const bool eq = tv == key;
-			if (((ccc & 7) == 5 && eq) || ((ccc & 7) == 4 && !eq)) return false;
+			if ((ccc & 7) == 1 || ((ccc & 7) == 5 && eq) || ((ccc & 7) == 4 && !eq)) return false;
 		}
 
 		ARGB tc = t;
@@ -501,15 +535,20 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 	}
 	c.a = as;
 
-	/* alpha blending or fog: fog blends with DP_FOG_CLR in place of the destination [RRG 6-4] */
+	/* ALPHA_FOG_EN [RRG 6-4]: 1 = blend with the destination; 2 = fog, the
+	 * fog colour (DP_FOG_CLR) "in place of the destination". The fog factor is
+	 * the ALPHA/FOG interpolator: out = src * f + fog * (1 - f), as the ATI
+	 * Direct3D HAL's vertex fog needs (86GPTBox part3, af == 2). */
 	const unsigned int af = (c3 >> 11) & 3;
-	if (af == 1 || af == 2) {
-		ARGB d;
-		if (af == 2) {
-			const uint32_t fc = R(M64_DP_FRGD_CLR);
-			d.a = 255; d.r = (fc >> 16) & 0xFF; d.g = (fc >> 8) & 0xFF; d.b = fc & 0xFF;
-		}
-		else d = UnpackDst(dst, dfmt);
+	if (af == 2) {
+		const uint32_t fc = R(M64_DP_FRGD_CLR);
+		const int f = ic.a + (ic.a >> 7);
+		c.r = (c.r * f + (int)((fc >> 16) & 0xFF) * (256 - f)) >> 8;
+		c.g = (c.g * f + (int)((fc >> 8) & 0xFF) * (256 - f)) >> 8;
+		c.b = (c.b * f + (int)(fc & 0xFF) * (256 - f)) >> 8;
+	}
+	else if (af == 1) {
+		const ARGB d = UnpackDst(dst, dfmt);
 		const unsigned int fs = (c3 >> 16) & 7, fd = (c3 >> 19) & 7;
 		int r = (c.r * BlendFactor(fs, as, d.r, true) + d.r * BlendFactor(fd, as, c.r, false)) >> 8;
 		int g = (c.g * BlendFactor(fs, as, d.g, true) + d.g * BlendFactor(fd, as, c.g, false)) >> 8;
@@ -530,15 +569,17 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 /* ---------------------------------------------------------------------- */
 
 static struct {
-	int64_t hacc0, vacc0;   /* 4.12 accumulators at the start */
+	int64_t hacc0, vacc0;   /* accumulators at the start, integer at bit 16 */
 	int64_t xinc, yinc;
 } S;
 
 void Mach64_Scale_Begin(void) {
-	S.hacc0 = sext(R(M64_RED_START), 17);   /* SCALE_HACC: sign, 4.12 */
-	S.vacc0 = sext(R(M64_SCALE_VACC), 17);
-	S.xinc = R(M64_SCALE_X_INC) & 0xFFFF;   /* 4.12 unsigned */
-	S.yinc = R(M64_SCALE_Y_INC) & 0xFFFF;
+	/* SCALE_HACC/VACC: sign, 4.12 in bits 20:4; SCALE_X/Y_INC: 4.12 unsigned in
+	 * bits 19:4 [RRG 6-2..6-7]; so the integer part is at bit 16 */
+	S.hacc0 = sext(R(M64_RED_START) & 0x001FFFF0u, 21);
+	S.vacc0 = sext(R(M64_SCALE_VACC) & 0x001FFFF0u, 21);
+	S.xinc = R(M64_SCALE_X_INC) & 0x000FFFF0u;
+	S.yinc = R(M64_SCALE_Y_INC) & 0x000FFFF0u;
 }
 
 /* col/row: destination pixel within the rectangle, counted from its start */
@@ -555,7 +596,7 @@ bool Mach64_Scale_Pixel(int32_t col, int32_t row, uint32_t dst, uint32_t &out) {
 	int64_t vy = S.vacc0 + (int64_t)(row < 0 ? -row : row) * S.yinc;
 	if (hx < 0) hx = 0;
 	if (vy < 0) vy = 0;
-	int32_t x0 = (int32_t)(hx >> 12), y0 = (int32_t)(vy >> 12);
+	int32_t x0 = (int32_t)(hx >> 16), y0 = (int32_t)(vy >> 16);
 	if (x0 >= w) x0 = w - 1;
 	if (y0 >= h) y0 = h - 1;
 
@@ -566,7 +607,7 @@ bool Mach64_Scale_Pixel(int32_t col, int32_t row, uint32_t dst, uint32_t &out) {
 	else {
 		/* 2-tap 5-bit coefficient linear blend in each direction [RRG 6-1] */
 		const int32_t x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
-		const int fx = (int)((hx >> 7) & 0x1F) << 3, fy = (int)((vy >> 7) & 0x1F) << 3;
+		const int fx = (int)((hx >> 11) & 0x1F) << 3, fy = (int)((vy >> 11) & 0x1F) << 3;
 		const ARGB a = FetchTexel(base, pitch, (uint32_t)x0, (uint32_t)y0, fmt);
 		const ARGB b = FetchTexel(base, pitch, (uint32_t)x1, (uint32_t)y0, fmt);
 		const ARGB cc = FetchTexel(base, pitch, (uint32_t)x0, (uint32_t)y1, fmt);

@@ -528,41 +528,30 @@ static bool LinePixel(uint32_t host) {
 /* Trapezoids (GT)                                                          */
 /* ---------------------------------------------------------------------- */
 
-extern void Mach64_3D_TrapBegin(void);
-extern void Mach64_3D_EdgeStepX(void);
-extern void Mach64_3D_EdgeStepY(void);
-extern void Mach64_3D_SpanBegin(bool with_dst_dir);
-extern void Mach64_3D_SpanStep(void);
-extern bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t dst_addr, int dst_size, uint32_t dst, uint32_t &out);
-
 static unsigned int trap_log_count = 0;
 
-/* One Bresenham step of a trapezoid edge per scan line. [RRG] documents the
- * registers (err/inc/dec, "INC must be positive, DEC negative", LNTH =
- * "trapezoid leading edge length") but not the stepping. Model used here:
- * the edge is walked in Y; while the error is positive it steps in X and
- * adds (DEC - INC), then INC is added once per scan line. For an edge no
- * flatter than 45 degrees this is exactly the Y-major line engine
- * (at most one X step, "err += DEC" when stepping, "err += INC" otherwise);
- * flatter edges step several pixels per line. Returns the X steps taken. */
-static int32_t EdgeStep(int32_t &x, int32_t &err, int32_t inc, int32_t dec, int32_t dir, bool zero_negative, bool lead) {
-	int32_t steps = 0;
-	const int32_t down = dec - inc;
-	if (down >= 0) {
-		/* malformed terms: no X movement rather than an endless loop */
-		err += inc;
-		return 0;
-	}
-	for (int guard = 0; guard < 4096; guard++) {
+/* One scan line of a trapezoid edge. [RRG] documents the registers
+ * (err/inc/dec, "INC must be positive, DEC negative", LNTH = "trapezoid
+ * leading edge length") but not the stepping. Per scan line INC is added
+ * once, then while the error is positive (a zero error counts as positive
+ * unless the edge's BRES_SIGN bit says otherwise) the edge steps one pixel in
+ * its X direction and adds DEC, so edges flatter than 45 degrees move several
+ * pixels per line. This is the order the ATI Windows 9x Direct3D HAL's edge
+ * terms need, as established by 86GPTBox's Rage II+ emulation against
+ * captured HAL command streams (vid_ati_mach64_3d_part3.inc,
+ * r3d_edge_step_scanline). Returns the X steps taken (signed). */
+static int32_t EdgeStep(int32_t &x, int32_t &err, int32_t inc, int32_t dec, int32_t dir, bool zero_negative) {
+	const int32_t old = x;
+	err += inc;
+	for (int steps = 0; steps < 8192; steps++) {
 		const bool pos = (err > 0) || (err == 0 && !zero_negative);
 		if (!pos) break;
 		x += dir;
-		err += down;
-		steps++;
-		if (lead) Mach64_3D_EdgeStepX();
+		err += dec;
+		/* malformed terms (DEC not negative): stop instead of running away */
+		if (dec >= 0) break;
 	}
-	err += inc;
-	return steps;
+	return x - old;
 }
 
 static void TrapezoidRun(void) {
@@ -583,6 +572,10 @@ static void TrapezoidRun(void) {
 	const int32_t trail_dir = (dcntl & M64_TRAIL_X_DIR) ? 1 : -1;
 	const bool lead_zneg  = (dcntl & M64_DST_BRES_SIGN) != 0;
 	const bool trail_zneg = (dcntl & M64_TRAIL_BRES_SIGN) != 0;
+	/* TRAP_FILL_DIR: 1 = the trailing edge is right of the leading edge [RRG 4-48] */
+	const bool fill_lr = (dcntl & M64_TRAP_FILL_DIR) != 0;
+	/* DST_POLYGON_RTEDGE_DIS leaves out the right edge pixel [RRG 4-48] */
+	const bool rtedge_dis = (dcntl & M64_DST_POLYGON_RTEDGE_DIS) != 0;
 	const bool use3d = Scale3DFcn() >= 2;
 
 	if (trap_log_count < 64) {
@@ -590,22 +583,32 @@ static void TrapezoidRun(void) {
 		LOG(LOG_VGAMISC, LOG_NORMAL)("MACH64 TRAP #%u lead=(%d,%d) err=%d inc=%d dec=%d dir=%d trail=%d err=%d inc=%d dec=%d dir=%d lines=%d dst_cntl=%08x 3d=%08x",
 			trap_log_count, lead_x, y, lead_err, lead_inc, lead_dec, lead_dir, trail_x, trail_err, trail_inc, trail_dec, trail_dir, lines,
 			dcntl, R(M64_SCALE_3D_CNTL));
+		if (use3d)
+			LOG(LOG_VGAMISC, LOG_NORMAL)("MACH64 TRAP #%u R=%08x/%08x/%08x A=%08x Z=%08x S=%08x/%08x/%08x T=%08x/%08x/%08x tex=%03x",
+				trap_log_count, R(M64_RED_START), R(M64_RED_X_INC), R(M64_RED_Y_INC), R(M64_ALPHA_START), R(M64_Z_START),
+				R(M64_S_START), R(M64_S_XINC_START), R(M64_S_Y_INC), R(M64_T_START), R(M64_T_XINC_START), R(M64_T_Y_INC),
+				R(M64_TEX_SIZE_PITCH));
 	}
+
+	/* bound the work of malformed commands: the span never leaves the pitch
+	 * or the scissors, and rows past the end of video memory are skipped */
+	int32_t xmin = A.sc_left < 0 ? 0 : A.sc_left;
+	int32_t xmax = A.sc_right;
+	if ((int32_t)A.dst_pitch > 0 && xmax >= (int32_t)A.dst_pitch) xmax = (int32_t)A.dst_pitch - 1;
 
 	if (use3d) Mach64_3D_TrapBegin();
 
 	for (int32_t l = 0; l < lines; l++) {
-		/* span between the two edges: left edge in, right edge out */
-		const int32_t left  = lead_x < trail_x ? lead_x : trail_x;
-		const int32_t right = lead_x < trail_x ? trail_x : lead_x;
-		const bool from_lead_up = lead_x <= trail_x;   /* span walks from the lead edge */
-		if (use3d) Mach64_3D_SpanBegin(from_lead_up == (lead_dir > 0));
-
-		if (y >= A.sc_top && y <= A.sc_bottom && right > left) {
-			const int32_t n = right - left;
-			for (int32_t i = 0; i < n; i++) {
-				const int32_t x = from_lead_up ? (lead_x + i) : (lead_x - 1 - i);
-				if (x >= A.sc_left && x <= A.sc_right) {
+		const int32_t lo = fill_lr ? lead_x : trail_x;
+		const int32_t hi = fill_lr ? trail_x : lead_x;
+		if (lo <= hi && y >= A.sc_top && y <= A.sc_bottom && y >= 0) {
+			const int32_t dl = lo < xmin ? xmin : lo;
+			int32_t dh = rtedge_dis ? hi : hi + 1;
+			if (dh > xmax + 1) dh = xmax + 1;
+			if (dl < dh) {
+				/* attributes are defined relative to the leading edge, stepping in DST_X_DIR */
+				if (use3d) Mach64_3D_SpanBegin((dl - lead_x) * lead_dir, lead_dir);
+				for (int32_t x = dl; x < dh; x++) {
 					const uint32_t addr = A.dst_offset + (uint32_t)(y * (int32_t)A.dst_pitch + x);
 					const uint32_t dst = Mach64_ReadPixel(addr, A.dst_size);
 					if (use3d) {
@@ -614,29 +617,37 @@ static void TrapezoidRun(void) {
 							const uint32_t wm = R(M64_DP_WRITE_MSK);
 							Mach64_WritePixel(addr, A.dst_size, (out & wm) | (dst & ~wm));
 						}
+						Mach64_3D_SpanStep();
 					}
 					else {
 						const uint32_t src = SourceColour(A.source_fg, x, y, x, y, 0, false);
 						DataPathPixel(x, y, true, src, false);
 					}
 				}
-				if (use3d) Mach64_3D_SpanStep();
 			}
 		}
 
-		/* next scan line */
+		/* next scan line: both edges, then the interpolators follow the
+		 * leading edge, one Y step and one X step per pixel it moved */
+		const int32_t lead_dx = EdgeStep(lead_x, lead_err, lead_inc, lead_dec, lead_dir, lead_zneg);
+		EdgeStep(trail_x, trail_err, trail_inc, trail_dec, trail_dir, trail_zneg);
+		if (use3d) {
+			Mach64_3D_EdgeStepY();
+			const int32_t steps = lead_dx < 0 ? -lead_dx : lead_dx;
+			for (int32_t s = 0; s < steps; s++) Mach64_3D_EdgeStepX();
+		}
 		y += A.yinc;
-		if (use3d) Mach64_3D_EdgeStepY();
-		EdgeStep(lead_x, lead_err, lead_inc, lead_dec, lead_dir, lead_zneg, true);
-		EdgeStep(trail_x, trail_err, trail_inc, trail_dec, trail_dir, trail_zneg, false);
 	}
 
-	/* the edges rest where the next trapezoid continues them */
+	/* The trajectory registers are live: the Windows HAL draws the second
+	 * trapezoid of a triangle by loading only TRAIL_X and the new trailing
+	 * edge, the leading edge and the interpolators continuing from here. */
 	mach64.reg[M64_DST_X] = (uint32_t)lead_x & 0x1FFF;
 	mach64.reg[M64_DST_Y] = (uint32_t)y & 0x7FFF;
 	mach64.reg[M64_DST_HEIGHT] = (mach64.reg[M64_DST_HEIGHT] & ~0x1FFFu) | ((uint32_t)trail_x & 0x1FFF);
 	mach64.reg[M64_DST_BRES_ERR] = (uint32_t)lead_err & 0x3FFFF;
 	mach64.reg[M64_TRAIL_BRES_ERR] = (uint32_t)trail_err & 0x3FFFF;
+	if (use3d) Mach64_3D_TrapEnd();
 	A.busy = false;
 }
 

@@ -387,7 +387,8 @@ bool     Mach64_3D_Enabled(void);
 void     Mach64_3D_TrapBegin(void);
 void     Mach64_3D_EdgeStepX(void);
 void     Mach64_3D_EdgeStepY(void);
-void     Mach64_3D_SpanBegin(bool with_dst_dir);
+void     Mach64_3D_SpanBegin(int32_t n, int32_t dir);   /* n: pixels from the lead edge in DST_X_DIR */
+void     Mach64_3D_TrapEnd(void);
 void     Mach64_3D_SpanStep(void);
 bool     Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t dst_addr, int dst_size, uint32_t dst, uint32_t &out);
 void     Mach64_Scale_Begin(void);
