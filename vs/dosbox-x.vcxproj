@@ -1601,6 +1601,9 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\hardware\vga_ati.cpp" />
     <ClCompile Include="..\src\hardware\vga_s3.cpp" />
     <ClCompile Include="..\src\hardware\vga_s3d.cpp" />
+<ClCompile Include="..\src\hardware\vga_mach64.cpp" />
+<ClCompile Include="..\src\hardware\vga_mach64_accel.cpp" />
+<ClCompile Include="..\src\hardware\vga_mach64_3d.cpp" />
     <ClCompile Include="..\src\hardware\vga_seq.cpp" />
     <ClCompile Include="..\src\hardware\vga_tseng.cpp" />
     <ClCompile Include="..\src\hardware\vga_xga.cpp" />
@@ -1630,6 +1633,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\ints\int10_pal.cpp" />
     <ClCompile Include="..\src\ints\int10_put_pixel.cpp" />
     <ClCompile Include="..\src\ints\int10_vesa.cpp" />
+<ClCompile Include="..\src\ints\int10_mach64.cpp" />
     <ClCompile Include="..\src\ints\int10_video_state.cpp" />
     <ClCompile Include="..\src\ints\int10_vptable.cpp" />
     <ClCompile Include="..\src\ints\mouse.cpp" />
@@ -1827,6 +1831,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClInclude Include="..\include\util_units.h" />
     <ClInclude Include="..\include\version_string.h" />
     <ClInclude Include="..\include\vga.h" />
+<ClInclude Include="..\include\vga_mach64.h" />
     <ClInclude Include="..\include\video.h" />
     <ClInclude Include="..\include\voodoo.h" />
     <ClInclude Include="..\include\waveformatex.h" />

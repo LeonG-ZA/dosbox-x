@@ -11334,7 +11334,7 @@ startfunction:
             reg_eax = 18;       // 640x480 16-color
             CALLBACK_RunRealInt(0x10);
 
-            if (svgaCard == SVGA_DOSBoxIG)
+            if (svgaCard == SVGA_DOSBoxIG || (svgaCard == SVGA_ATI && atiCard == ATI_Mach64GT))
                 VGA_StartUpdateLFB();
         }
         else if (machine == MCH_PC98) {
@@ -11671,6 +11671,7 @@ startfunction:
                             case ATI_Mach8:            card = "ATI Mach8"; break;
                             case ATI_Mach32:           card = "ATI Mach32"; break;
                             case ATI_Mach64:           card = "ATI Mach64"; break;
+                            case ATI_Mach64GT:         card = "ATI 3D RAGE (Mach64 GT)"; break;
                         }
                         break;
                     case SVGA_DOSBoxIG:

@@ -470,8 +470,44 @@ static void Deinitialize(void) {
 static PCI_Device *S3_PCI=NULL;
 static PCI_Device *SST_PCI=NULL;
 static PCI_Device *DOSBoxIG_PCI=NULL;
+static PCI_Device *Mach64_PCI=NULL;
 
 extern bool enable_pci_vga;
+
+/* ATI 3D RAGE (mach64 GT): configuration space is kept by vga_mach64.cpp,
+ * which relocates the aperture and the block I/O ports on BAR writes. */
+uint8_t Mach64_PCI_ConfigRead(uint8_t regnum);
+void Mach64_PCI_ConfigWrite(uint8_t regnum, uint8_t val);
+
+class PCI_Mach64Device:public PCI_Device {
+public:
+	PCI_Mach64Device():PCI_Device(0x1002,0x4754) {
+		for (unsigned int i = 0; i < 256; i++) config[i] = Mach64_PCI_ConfigRead((uint8_t)i);
+	}
+	void config_write(uint8_t regnum,Bitu iolen,uint32_t value) override {
+		for (Bitu i = 0; i < iolen && (regnum + i) < 256; i++) {
+			Mach64_PCI_ConfigWrite((uint8_t)(regnum + i), (uint8_t)(value >> (i * 8)));
+			config[regnum + i] = Mach64_PCI_ConfigRead((uint8_t)(regnum + i));
+		}
+	}
+	uint32_t config_read(uint8_t regnum,Bitu iolen) override {
+		uint32_t v = 0;
+		for (Bitu i = 0; i < iolen && (regnum + i) < 256; i++)
+			v |= (uint32_t)Mach64_PCI_ConfigRead((uint8_t)(regnum + i)) << (i * 8);
+		return v;
+	}
+};
+
+void PCI_AddSVGAMach64_Device(void) {
+	if (!pcibus_enable || !enable_pci_vga) return;
+
+	if (Mach64_PCI == NULL) {
+		if ((Mach64_PCI=new PCI_Mach64Device()) == NULL)
+			return;
+
+		RegisterPCIDevice(Mach64_PCI);
+	}
+}
 
 void PCI_AddSVGADOSBoxIG_Device(void) {
 	if (!pcibus_enable || !enable_pci_vga) return;

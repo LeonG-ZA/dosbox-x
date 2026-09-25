@@ -44,6 +44,7 @@
 #include "sdlmain.h"
 #include "shiftjis.h"
 #include "../ints/int10.h"
+#include "vga_mach64.h"
 #include "pc98_cg.h"
 #include "pc98_gdc.h"
 #include "pc98_gdc_const.h"
@@ -350,6 +351,14 @@ bool TempLineAlloc(unsigned int w) {
 void TempLineFree(void) {
 	if (TempLine) free(TempLine);
 	TempLine = NULL;
+}
+
+/* ATI mach64 GT: the accelerator CRTC is driving the display (set by VGA_SetupDrawing) */
+static bool mach64_scanout = false;
+
+static uint8_t * VGA_Draw_Mach64_Line(Bitu vidstart, Bitu /*line*/) {
+	if (TempLineSize < vga.draw.width * 4u) return TempLine;
+	return Mach64_DrawLine(vidstart, vga.draw.lines_done, TempLine);
 }
 
 void pc98_update_display_page_ptr(void);
@@ -6132,6 +6141,8 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 
 	/* S3 ViRGE: vertical sync interrupt status (MM8504 bit 0), polled by S3D Toolkit page flips */
 	S3_ViRGE_VSync();
+	/* ATI mach64 GT: CRTC_VBLANK_INT latch */
+	Mach64_VerticalRetrace();
 
 	dbg_event_maxscan = false;
 	dbg_event_scanstep = false;
@@ -6464,6 +6475,12 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 
 	if (vga.dosboxig.svga) {
 		vga.draw.address = vga.dosboxig.display_offset;
+		vga.draw.linear_mask = vga.mem.memmask;
+		vga.draw.address_line = 0;
+	}
+	else if (mach64_scanout) {
+		/* ATI mach64 GT accelerator CRTC: CRTC_OFFSET, latched once per frame */
+		vga.draw.address = Mach64_DisplayStart();
 		vga.draw.linear_mask = vga.mem.memmask;
 		vga.draw.address_line = 0;
 	}
@@ -7055,6 +7072,13 @@ void VGA_CheckScanLength(void) {
 		vga.draw.address_add=vga.dosboxig.bytes_per_scanline;
 		return;
 	}
+	if (mach64_scanout) {
+		Mach64_Display d;
+		if (Mach64_GetDisplay(d)) {
+			vga.draw.address_add = d.pitch_bytes;
+			return;
+		}
+	}
 
 	switch (vga.mode) {
 		case M_EGA:
@@ -7326,6 +7350,9 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 	Bitu vtotal, vdend, vbstart, vbend, vrstart, vrend;
 	Bitu hbend_mask, vbend_mask;
 	Bitu vblank_skip;
+	Mach64_Display m64d;
+
+	mach64_scanout = false;
 
 	/* NTS: PC-98 emulation re-uses VGA state FOR NOW.
 	 *      This will slowly change to accommodate PC-98 display controller over time
@@ -7515,6 +7542,20 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 			vrend   += (vga.dosboxig.ha_total / 3) * 2;
 
 			LOG(LOG_MISC,LOG_DEBUG)("DOSBOX IG w=%u h=%u",vga.dosboxig.width,vga.dosboxig.height);
+		}
+
+		/* ATI mach64 GT: in extended display mode the accelerator CRTC gives the
+		 * timing, in pixels and lines, and the pixel clock comes from the PLL */
+		if (Mach64_GetDisplay(m64d)) {
+			mach64_scanout = true;
+			htotal = m64d.htotal; hdend = m64d.hdend;
+			hbstart = m64d.hbstart; hbend = m64d.hbend;
+			hrstart = m64d.hrstart; hrend = m64d.hrend;
+			vtotal = m64d.vtotal; vdend = m64d.vdend;
+			vbstart = m64d.vbstart; vbend = m64d.vbend;
+			vrstart = m64d.vrstart; vrend = m64d.vrend;
+			oscclock = clock = m64d.pixclock;
+			/* interlaced modes are rendered as progressive frames */
 		}
 	} else {
 		// not EGAVGA_ARCH
@@ -7808,6 +7849,18 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 		else
 			vga.draw.doublescan_effect = true;
 	}
+	else if (mach64_scanout) {
+		/* CRTC_DBL_SCAN_EN: every line is scanned twice [RRG 4-28] */
+		vga.draw.address_line_total = m64d.doublescan ? 2 : 1;
+		vga.draw.render_max = 1;
+		vga.draw.doublescan_effect = vga.draw.doublescan_set;
+		if (vga.draw.doublescan_effect && !RENDER_IsScalerCompatibleWithDoublescan())
+			vga.draw.doublescan_effect = false;
+		if ((!vga.draw.doublescan_effect) && (vga.draw.address_line_total & 1) == 0)
+			height /= 2;
+		else
+			vga.draw.doublescan_effect = true;
+	}
 	else if (IS_EGAVGA_ARCH || IS_PC98_ARCH) {
 		vga.draw.address_line_total=(vga.crtc.maximum_scan_line&0x1fu)+1u;
 		switch(vga.mode) {
@@ -7869,7 +7922,7 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 	 * on SVGA hardware. Without this check, those demos will show
 	 * credits that scroll upward to blackness before "popping" back
 	 * onto the screen. */
-	if (vga.dosboxig.svga) {
+	if (vga.dosboxig.svga || mach64_scanout) {
 		/* no restrictions */
 	}
 	else if (IS_VGA_ARCH) {
@@ -7934,6 +7987,13 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 					break;
 			}
 		}
+	}
+	else if (mach64_scanout) {
+		/* timings are in pixels; every depth is converted to 32 bpp with the hardware cursor */
+		pix_per_char = 1;
+		bpp = 32;
+		VGA_DrawLine = VGA_Draw_Mach64_Line;
+		VGA_DrawRawLine = NULL;
 	}
 	else {
 		switch (vga.mode) {

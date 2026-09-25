@@ -34,6 +34,7 @@
 #include "control.h"
 #include "sdlmain.h"
 #include "bitop.h"
+#include "vga_mach64.h"
 
 #include <output/output_ttf.h>
 
@@ -2574,6 +2575,10 @@ dac_text16:
 		modeData.vtotal = CurMode->vtotal;
 		svga.set_video_mode(crtc_base, &modeData);
 	}
+
+	/* ATI 3D RAGE: SVGA modes run on the accelerator CRTC, programmed from the
+	 * VGA parameters as ATI's own BIOS does (BIOS kit 3-7) */
+	if (Mach64_Present()) Mach64_INT10_SetMode(CurMode);
 
 	if(IS_J3100) {
 		J3_SetBiosArea(mode);

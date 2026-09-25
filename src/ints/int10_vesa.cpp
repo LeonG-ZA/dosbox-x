@@ -30,6 +30,7 @@
 #include "render.h"
 #include "dos_inc.h"
 #include "bitop.h"
+#include "vga_mach64.h"
 
 #define DOSBOX_INCLUDE
 #include "iglib.h"
@@ -566,8 +567,91 @@ uint8_t VESA_GetSVGAMode(uint16_t & mode) {
 	return VESA_SUCCESS;
 }
 
+/* ATI 3D RAGE: the SVGA modes run on the accelerator CRTC. Pitch and start
+ * address are CRTC_OFF_PITCH (pitch in units of 8 pixels, offset in qwords),
+ * the CPU window is MEM_VGA_WP_SEL/RP_SEL in 32 KB pages. */
+static bool Mach64_VESAMode(void) {
+	if (!Mach64_Present() || !Mach64_ExtDisplayActive()) return false;
+	switch (CurMode->type) {
+		case M_LIN8: case M_LIN15: case M_LIN16: case M_LIN24: case M_LIN32: case M_PACKED4: return true;
+		default: return false;
+	}
+}
+
+static unsigned int Mach64_VESABytesPerPixelX2(void) {
+	switch (CurMode->type) {
+		case M_PACKED4: return 1;
+		case M_LIN15: case M_LIN16: return 4;
+		case M_LIN24: return 6;
+		case M_LIN32: return 8;
+		default: return 2;
+	}
+}
+
+static uint8_t Mach64_VESA_ScanLineLength(uint8_t subcall,uint16_t val,uint16_t & bytes,uint16_t & pixels,uint16_t & lines) {
+	const unsigned int bpp2 = Mach64_VESABytesPerPixelX2();
+	const uint32_t offp = Mach64_IOReadReg(M64_CRTC_OFF_PITCH);
+	Bitu pitch = ((offp >> 22) & 0x3FF) * 8u;                      /* pixels */
+	Bitu max_pitch = 0x3FF * 8u;
+	const Bitu lim = (vga.mem.vbe_memsize * 2u) / (bpp2 * CurMode->sheight);
+	if (max_pitch > lim) max_pitch = lim & ~(Bitu)7;
+	if (max_pitch == 0) return VESA_HW_UNSUPPORTED;
+
+	switch (subcall) {
+		case 0x00: /* in pixels */
+		case 0x02: /* in bytes */
+			pitch = (subcall == 0x00) ? val : (((Bitu)val * 2u + bpp2 - 1) / bpp2);
+			pitch = (pitch + 7u) & ~(Bitu)7;
+			if (pitch == 0) return VESA_HW_UNSUPPORTED;
+			if (pitch > max_pitch) pitch = max_pitch;
+			Mach64_INT10_SetPitch((uint32_t)pitch);
+			break;
+		case 0x01:
+			break;
+		case 0x03:
+			pitch = max_pitch;
+			break;
+		default:
+			return VESA_UNIMPLEMENTED;
+	}
+	bytes = (uint16_t)((pitch * bpp2) / 2u);
+	pixels = (uint16_t)pitch;
+	if (!bytes) return VESA_FAIL;
+	unsigned int lines32 = (unsigned int)(vga.mem.vbe_memsize / bytes);
+	if (lines32 > 0xFFFF) lines32 = 0xFFFF;
+	lines = (uint16_t)lines32;
+	return VESA_SUCCESS;
+}
+
+static uint8_t Mach64_VESA_SetDisplayStart(uint16_t x,uint16_t y,bool wait) {
+	const unsigned int bpp2 = Mach64_VESABytesPerPixelX2();
+	const uint32_t pitch = ((Mach64_IOReadReg(M64_CRTC_OFF_PITCH) >> 22) & 0x3FF) * 8u;
+	const uint32_t byteoff = (uint32_t)(((uint64_t)y * pitch + x) * bpp2 / 2u);
+	Mach64_INT10_SetDisplayStart(byteoff);
+	if (wait) CALLBACK_RunRealFar(RealSeg(int10.rom.wait_retrace),RealOff(int10.rom.wait_retrace));
+	return VESA_SUCCESS;
+}
+
+static uint8_t Mach64_VESA_GetDisplayStart(uint16_t & x,uint16_t & y) {
+	const unsigned int bpp2 = Mach64_VESABytesPerPixelX2();
+	const uint32_t pitch = ((Mach64_IOReadReg(M64_CRTC_OFF_PITCH) >> 22) & 0x3FF) * 8u;
+	const uint32_t start = Mach64_INT10_GetDisplayStart();
+	const uint32_t pix = (start * 2u) / bpp2;
+	if (pitch) { x = (uint16_t)(pix % pitch); y = (uint16_t)(pix / pitch); }
+	else { x = y = 0; }
+	return VESA_SUCCESS;
+}
+
 uint8_t VESA_SetCPUWindow(uint8_t window,uint16_t address) {
 	if (window && !vesa_bank_switch_window_mirror) return VESA_FAIL;
+	if (Mach64_Present()) {
+		address &= vga.svga.bank_mask;
+		if ((!vesa_bank_switch_window_range_check) || (uint32_t)address * vga.svga.bank_size < vga.mem.vbe_memsize) {
+			Mach64_INT10_SetBank(address);
+			return VESA_SUCCESS;
+		}
+		return VESA_FAIL;
+	}
 
 	/* despite the fact DX in INT 10h AX=4F05h is the window address,
 	 * VESA BIOSes probably only look at DL anyway, because cards in the
@@ -600,7 +684,10 @@ uint8_t VESA_SetCPUWindow(uint8_t window,uint16_t address) {
 
 uint8_t VESA_GetCPUWindow(uint8_t window,uint16_t & address) {
 	if (window && !vesa_bank_switch_window_mirror) return VESA_FAIL;
-	if (svgaCard == SVGA_DOSBoxIG) {
+	if (Mach64_Present()) {
+		address = (uint16_t)Mach64_INT10_GetBank();
+	}
+	else if (svgaCard == SVGA_DOSBoxIG) {
 		address=vga.svga.bank_read_full / vga.svga.bank_size;
 	}
 	else {
@@ -662,6 +749,9 @@ uint8_t VESA_ScanLineLength(uint8_t subcall,uint16_t val, uint16_t & bytes,uint1
 	Bitu new_offset = vga.dosboxig.svga ? vga.dosboxig.bytes_per_scanline : vga.config.scan_len;
 	Bitu screen_height = CurMode->sheight;
 	Bitu max_offset;
+
+	if (Mach64_VESAMode())
+		return Mach64_VESA_ScanLineLength(subcall,val,bytes,pixels,lines);
 
 	/* this special hack is for the Windows 3.1 S3 driver in "640x480 (1MB) 16 million colors" mode which does no scan line or display offset calls at all */
 	if (CurMode->special & _S3_POW2_STRIDE)
@@ -854,6 +944,9 @@ uint8_t VESA_SetDisplayStart(uint16_t x,uint16_t y,bool wait) {
 			wait = int10.vesa_oldvbe;
 	}
 
+	if (Mach64_VESAMode())
+		return Mach64_VESA_SetDisplayStart(x,y,wait);
+
 	if (vga.dosboxig.svga) {
 		uint32_t offset = vga.dosboxig.bytes_per_scanline * y;
 		uint8_t hpel = 0;
@@ -956,6 +1049,9 @@ uint8_t VESA_SetDisplayStart(uint16_t x,uint16_t y,bool wait) {
 uint8_t VESA_GetDisplayStart(uint16_t & x,uint16_t & y) {
 	Bitu pixels_per_offset;
 	Bitu panning_factor = 1;
+
+	if (Mach64_VESAMode())
+		return Mach64_VESA_GetDisplayStart(x,y);
 
 	if (vga.dosboxig.svga) {
 		if (vga.dosboxig.bytes_per_scanline) {

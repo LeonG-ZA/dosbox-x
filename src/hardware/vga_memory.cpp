@@ -35,6 +35,7 @@
 #include "pc98_gdc.h"
 #include "zipfile.h"
 #include "src/ints/int10.h"
+#include "vga_mach64.h"
 
 unsigned char pc98_pegc_mmio[0x200] = {0}; /* PC-98 memory-mapped PEGC registers at E0000h */
 uint32_t pc98_pegc_banks[2] = {0x0000,0x0000}; /* bank switching offsets */
@@ -2541,6 +2542,13 @@ void VGA_SetupHandlers(void) {
 		vga.svga.bank_read_full = vga.dosboxig.rbank_offset & (~0xFFFu);
 		vga.svga.bank_write_full = vga.dosboxig.wbank_offset & (~0xFFFu);
 	}
+	else if (Mach64_Present()) {
+		/* MEM_VGA_RP_SEL / MEM_VGA_WP_SEL, 32 KB pages */
+		uint32_t rd, wr;
+		Mach64_GetBanks(rd, wr);
+		vga.svga.bank_read_full = rd;
+		vga.svga.bank_write_full = wr;
+	}
 	else {
 		vga.svga.bank_read_full = vga.svga.bank_read*vga.svga.bank_size;
 		vga.svga.bank_write_full = vga.svga.bank_write*vga.svga.bank_size;
@@ -2844,6 +2852,8 @@ void VGA_SetupHandlers(void) {
 	}
 	if(svgaCard == SVGA_S3Trio && (vga.s3.ext_mem_ctrl & 0x10))
 		MEM_SetPageHandler(VGA_PAGE_A0, 16, &vgaph.mmio);
+	/* ATI mach64 GT: registers at B000:F800-FFFF with CFG_MEM_VGA_AP_EN */
+	Mach64_SetupHandlers();
 
 	/* NTS: Based on a discussion on GitHub [https://github.com/joncampbell123/dosbox-x/issues/4042] and
 	 *      on Vogons [https://www.vogons.org/viewtopic.php?t=45808] it makes logical sense that Chain 4
@@ -2865,6 +2875,26 @@ range_done:
 }
 
 void VGA_StartUpdateLFB(void) {
+	if (Mach64_Present()) {
+		/* ATI mach64 GT: the aperture is placed by PCI BAR0. Video memory from its
+		 * base, the register page at +7FF000h (vga_mach64.cpp). */
+		uint32_t base; bool enabled;
+		Mach64_LFBInfo(base, enabled);
+		if (!enabled) {
+			vga.lfb.page = base >> 12u;
+			vga.lfb.addr = base;
+			vga.lfb.handler = NULL;
+			MEM_SetLFB(0,0,NULL,NULL);
+			return;
+		}
+		Bitu pages = (Bitu)vga.mem.memsize / 4096u;
+		if (pages > 0x7FFu) pages = 0x7FFu;
+		vga.lfb.page = base >> 12u;
+		vga.lfb.addr = base;
+		vga.lfb.handler = vga_memio_lfb_delay ? &vgaph.lfb_slow : &vgaph.lfb;
+		MEM_SetLFB(vga.lfb.page, pages, vga.lfb.handler, Mach64_GetMMIOHandler());
+		return;
+	}
 	if (svgaCard == SVGA_DOSBoxIG) {
 		/* TODO: Perhaps the DOSBox Integrated Device could have an MMIO region */
 		vga.lfb.page = (unsigned int)(S3_LFB_BASE >> 12ul);

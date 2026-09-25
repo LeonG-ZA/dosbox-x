@@ -31,6 +31,7 @@
 #include "setup.h"
 #include "render.h"
 #include "jfont.h"
+#include "vga_mach64.h"
 
 Int10Data int10;
 bool blinking=true;
@@ -72,6 +73,9 @@ Bitu INT10_Handler(void) {
 	INT10_SetCurMode();
 
 	switch (reg_ah) {
+	case 0xa0:								/* ATI mach64 extended ROM services (BIOS kit A-11) */
+		if (Mach64_Present()) Mach64_INT10_Extended();
+		break;
 	case 0x00:								/* Set VideoMode */
 		Mouse_BeforeNewVideoMode(true);
 		SetTrueVideoMode(reg_al);
@@ -807,7 +811,7 @@ CX	640x480	800x600	  1024x768/1280x1024
 		}
 		break;
 	case 0x4f:								/* VESA Calls */
-		if ((!IS_VGA_ARCH) || !(svgaCard==SVGA_S3Trio||svgaCard==SVGA_DOSBoxIG))
+		if ((!IS_VGA_ARCH) || !(svgaCard==SVGA_S3Trio||svgaCard==SVGA_DOSBoxIG||Mach64_Present()))
 			break;
 		if (int10.vesa_oldvbe10 && reg_al >= 6) /* Functions 6 and up did not exist until VBE 1.2 (or 1.1?) */
 			break;

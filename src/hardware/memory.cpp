@@ -781,7 +781,14 @@ void MEM_SetLFB(Bitu page, Bitu pages, PageHandler *handler, PageHandler *mmioha
     memory.lfb_mmio.handler=mmiohandler;
     if (mmiohandler != NULL) {
         /* FIXME: Why is this hard-coded? There's more than just S3 emulation in this code's future! */
-        if (svgaCard == SVGA_S3Trio && (s3Card == S3_Trio64V || s3Card == S3_Vision868 || s3Card == S3_Vision968 || s3Card == S3_ViRGE || s3Card == S3_ViRGEVX)) {
+        if (svgaCard == SVGA_ATI && atiCard == ATI_Mach64GT) {
+            /* ATI mach64 GT: 8 MB little endian aperture whose last 4 KB page holds
+             * register blocks 1 and 0 (RRG-G02700 2-2) */
+            memory.lfb_mmio.start_page=page+(0x7FF000/4096);
+            memory.lfb_mmio.end_page=page+(0x7FF000/4096)+1;
+            memory.lfb_mmio.pages=1;
+        }
+        else if (svgaCard == SVGA_S3Trio && (s3Card == S3_Trio64V || s3Card == S3_Vision868 || s3Card == S3_Vision968 || s3Card == S3_ViRGE || s3Card == S3_ViRGEVX)) {
             /* 64MB BAR. According to the datasheet, this 64MB region is split into two 32MB halves,
              * the lower half "little endian" and the upper half "big endian". Within the 32MB region,
              * the low 16MB is video memory and the high 16MB is MMIO. */

@@ -371,6 +371,16 @@ void INT10_SetupRomMemory(void) {
 						case ATI_Mach64: // ATI 88800GX
 							phys_writeb(rom_base+0x43,0x20); // confirmed by PCem rom image mach64g/bios.bin
 							break;
+						case ATI_Mach64GT: { // ATI 3D RAGE
+							/* NTS: The mach64 VT2 ROM has 0x40 here (see the FIXME above); the CT/VT/GT
+							 *      family all share the mach64 BIOS kit layout. The ROM header tables the
+							 *      drivers read (ROM offset 48h) and the extended services entry point
+							 *      (ROM offset 64h) are set up by Mach64_SetupROM. */
+							phys_writeb(rom_base+0x43,0x40);
+							extern void Mach64_SetupROM(PhysPt rom_base);
+							Mach64_SetupROM(rom_base);
+							break;
+						}
 						default:
 							break;
 					};
@@ -411,7 +421,7 @@ void INT10_SetupRomMemory(void) {
 		int10.rom.used=0x100;
 	}
 	
-	if (IS_VGA_ARCH && (svgaCard==SVGA_S3Trio || svgaCard==SVGA_DOSBoxIG)) INT10_SetupVESA();
+	if (IS_VGA_ARCH && (svgaCard==SVGA_S3Trio || svgaCard==SVGA_DOSBoxIG || (svgaCard==SVGA_ATI && atiCard==ATI_Mach64GT))) INT10_SetupVESA();
 	
 	if (VGA_BIOS_dont_duplicate_CGA_first_half) {
 		int10.rom.font_8_first=RealMake(0xF000,0xFA6E); /* why duplicate data? use the copy in the ROM BIOS */

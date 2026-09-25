@@ -183,7 +183,8 @@ enum ATICard {
 	ATI_VGAWonderXL24,           // ATI 28800-6 VGA Wonder
 	ATI_Mach8,                   // ATI 38800-1
 	ATI_Mach32,                  // ATI 68800-3
-	ATI_Mach64                   // ATI 88800GX
+	ATI_Mach64,                  // ATI 88800GX
+	ATI_Mach64GT                 // ATI 3D RAGE (mach64 GT, 264GT)
 };
 
 typedef Bitu				(LoopHandler)(void);

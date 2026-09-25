@@ -2039,6 +2039,8 @@ extern void POD_Load_VGA_Memory( std::istream & );
 extern void POD_Load_VGA_Paradise( std::istream & );
 extern void POD_Load_VGA_Tseng( std::istream & );
 extern void POD_Load_VGA_XGA( std::istream & );
+extern void POD_Save_VGA_Mach64( std::ostream & );
+extern void POD_Load_VGA_Mach64( std::istream & );
 
 //save state support
 void *VGA_SetupDrawing_PIC_Event = (void*)((uintptr_t)VGA_SetupDrawing);
@@ -2167,6 +2169,7 @@ private:
 		POD_Save_VGA_Paradise(stream);
 		POD_Save_VGA_Tseng(stream);
 		POD_Save_VGA_XGA(stream);
+		POD_Save_VGA_Mach64(stream);
 	}
 
 	void setBytes(std::istream& stream) override
@@ -2278,6 +2281,7 @@ private:
 		POD_Load_VGA_Paradise(stream);
 		POD_Load_VGA_Tseng(stream);
 		POD_Load_VGA_XGA(stream);
+		POD_Load_VGA_Mach64(stream);
 
 		//********************************
 		//********************************

@@ -88,7 +88,15 @@ void ATIExtData_Write(Bitu port, Bitu val, Bitu /*len*/) {
 	LOG(LOG_MISC,LOG_DEBUG)("Unhandled ATI extended write port=%x index=%x val=%x",(unsigned int)port,ati_state.index,(unsigned int)val);
 }
 
+void SVGA_Setup_Mach64(void);
+
 void SVGA_Setup_ATI(void) {
+	if (atiCard == ATI_Mach64GT) {
+		/* 3D RAGE: accelerator registers instead of the 28800 extended VGA registers */
+		SVGA_Setup_Mach64();
+		return;
+	}
+
 	if (vga.mem.memsize == 0)
 		vga.mem.memsize = 512*1024;
 
