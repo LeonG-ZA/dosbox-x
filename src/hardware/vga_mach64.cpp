@@ -330,14 +330,19 @@ uint8_t *Mach64_DrawLine(Bitu vidstart, Bitu line, uint8_t *templine) {
 
 	/* Hardware cursor [RRG 4-33]: 64x64, 2 bits per pixel, 16 bytes per
 	 * row, "reverse pixel order within each byte" (pixel 0 in bits 1:0).
-	 * 00 = colour 0, 01 = colour 1, 10 = transparent, 11 = invert. */
+	 * 00 = colour 0, 01 = colour 1, 10 = transparent, 11 = invert.
+	 * CUR_HORZ_OFF skips the first pixels of each row; CUR_VERT_OFF only
+	 * shortens the cursor to 64 - VERT_OFF rows from CUR_OFFSET (clipping at
+	 * the top is done by moving CUR_OFFSET, as atyfb does; ATI's Windows 9x
+	 * driver keeps its 32x32 pointer in rows 0-31, columns 32-63, with both
+	 * offsets 32). */
 	if (R(M64_GEN_TEST_CNTL) & 0x80) {
 		const uint32_t posn = R(M64_CUR_HORZ_VERT_POSN);
 		const uint32_t off  = R(M64_CUR_HORZ_VERT_OFF);
 		const int cx = (int)(posn & 0x7FF), cy = (int)((posn >> 16) & 0x7FF);
 		const int xoff = (int)(off & 0x3F), yoff = (int)((off >> 16) & 0x3F);
-		const int row = (int)line - cy + yoff;
-		if ((int)line >= cy && row < 64) {
+		const int row = (int)line - cy;
+		if (row >= 0 && row < 64 - yoff) {
 			const Bitu base = (Bitu)(R(M64_CUR_OFFSET) & 0xFFFFF) * 8u + (Bitu)row * 16u;
 			const uint32_t c0 = R(M64_CUR_CLR0), c1 = R(M64_CUR_CLR1);
 			const uint32_t col0 = Mach64_HostRGB((c0 >> 24) & 0xFF, (c0 >> 16) & 0xFF, (c0 >> 8) & 0xFF);
@@ -417,6 +422,14 @@ void Mach64_AutoShot(void) {
 		extern void CAPTURE_ScreenShotEvent(bool pressed);
 		CAPTURE_ScreenShotEvent(true);
 		Mach64_CovDump("screenshot");
+		{
+			const Bitu cb = (Bitu)(R(M64_CUR_OFFSET) & 0xFFFFF) * 8u;
+			char hex[80]; size_t hn = 0;
+			for (unsigned int i = 0; i < 32; i++) hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x", vga.mem.linear[(cb + 16 * 32 + i) & vga.mem.memmask]);
+			LOG_MSG("M64 CURSOR gen_test=%08x off=%08x posn=%08x hvoff=%08x clr0=%08x clr1=%08x crtc_gen=%08x row32: %s",
+				(unsigned)R(M64_GEN_TEST_CNTL), (unsigned)R(M64_CUR_OFFSET), (unsigned)R(M64_CUR_HORZ_VERT_POSN), (unsigned)R(M64_CUR_HORZ_VERT_OFF),
+				(unsigned)R(M64_CUR_CLR0), (unsigned)R(M64_CUR_CLR1), (unsigned)R(M64_CRTC_GEN_CNTL), hex);
+		}
 		next++;
 	}
 }
