@@ -137,14 +137,14 @@ static uint8_t MemCodeFor(uint32_t bytes) {
 }
 
 unsigned int Mach64_SetupCapabilityTable(uint32_t rom_base, unsigned int at) {
-	static const unsigned int widths[] = { 640, 800, 1024, 1280, 1600 };
-	static const unsigned int heights[] = { 480, 600, 768, 1024, 1200 };
+	static const unsigned int widths[] = { 320, 400, 512, 640, 800, 1024, 1280, 1600 };
+	static const unsigned int heights[] = { 240, 300, 384, 480, 600, 768, 1024, 1200 };
 	static const struct { uint8_t code, bytespp; } depths[] = { { 6, 4 }, { 5, 3 }, { 4, 2 }, { 3, 2 }, { 2, 1 } };
 	unsigned int n = at;
 	phys_writeb(rom_base + n++, 0);        /* format type 0: DACMASK */
 	phys_writeb(rom_base + n++, 5);        /* bytes per row */
 	mach64_captable = (uint16_t)n;
-	for (unsigned int r = 0; r < 5; r++) {
+	for (unsigned int r = 0; r < 8; r++) {
 		for (const auto &d : depths) {
 			const uint8_t m = MemCodeFor(widths[r] * heights[r] * d.bytespp);
 			if (m == 0xF) continue;
@@ -321,17 +321,25 @@ unsigned int Mach64_INT10_GetBank(void) {
 
 /* Resolution codes (AL=0, CH) and the CRTC timings the mode tables report
  * (VESA DMT 60 Hz timings; [BK A-20] mode table layout). Horizontal values
- * in pixels, vertical in lines, dot clock in 10 kHz. */
+ * in pixels, vertical in scan lines, dot clock in 10 kHz. The low resolution
+ * codes E1h-E5h [PRG-215R3 A-2] are double scanned where the height is below
+ * 350 (vertical values then count scan lines, as in atyfb): Wipeout's 3D
+ * Rage edition asks DirectDraw for 320x240, 400x300 and 512x384. */
 struct Mach64_Res {
 	uint8_t code; uint16_t w, h;
 	uint16_t htotal, hss, hsw, vtotal, vss, vsw, clock;
-	bool hneg, vneg;
+	bool hneg, vneg, dbl;
 };
 static const Mach64_Res mach64_res[] = {
-	{ 0x12,  640,  480,  800,  656,  96,  525,  490, 2,  2518, true,  true  },
-	{ 0x6A,  800,  600, 1056,  840, 128,  628,  601, 4,  4000, false, false },
-	{ 0x55, 1024,  768, 1344, 1048, 136,  806,  771, 6,  6500, true,  true  },
-	{ 0x83, 1280, 1024, 1688, 1328, 112, 1066, 1025, 3, 10800, false, false },
+	{ 0xE2,  320,  200,  400,  328,  48,  449,  412, 2,  1259, true,  false, true  },
+	{ 0xE3,  320,  240,  400,  328,  48,  525,  490, 2,  1259, true,  true,  true  },
+	{ 0xE5,  400,  300,  528,  424,  64,  628,  601, 4,  2000, false, false, true  },
+	{ 0xE4,  512,  384,  672,  528,  64,  806,  771, 6,  3250, true,  true,  true  },
+	{ 0xE1,  640,  400,  800,  656,  96,  449,  412, 2,  2518, true,  false, false },
+	{ 0x12,  640,  480,  800,  656,  96,  525,  490, 2,  2518, true,  true,  false },
+	{ 0x6A,  800,  600, 1056,  840, 128,  628,  601, 4,  4000, false, false, false },
+	{ 0x55, 1024,  768, 1344, 1048, 136,  806,  771, 6,  6500, true,  true,  false },
+	{ 0x83, 1280, 1024, 1688, 1328, 112, 1066, 1025, 3, 10800, false, false, false },
 };
 
 /* A000h: program the accelerator CRTC [PRG-215R3 A-2] from the built-in
@@ -370,9 +378,10 @@ static bool Mach64_LoadCRTC(uint8_t ch, uint8_t cl, PhysPt table) {
 		if (!r) return false;
 		ht = r->htotal / 8 - 1; hd = r->w / 8 - 1; hss = r->hss / 8 - 1;
 		hsw = (r->hsw / 8) | (r->hneg ? 0x20 : 0);
-		vt = r->vtotal - 1u; vd = r->h - 1u; vss = r->vss - 1u;
+		vt = r->vtotal - 1u; vd = (r->dbl ? 2u * r->h : r->h) - 1u; vss = r->vss - 1u;
 		vsw = r->vsw | (r->vneg ? 0x20 : 0);
 		clock_10k = r->clock;
+		if (r->dbl) flags |= 0x100;
 	}
 	if (hd == 0 || vd == 0 || ht < hd || vt < vd) return false;
 
@@ -482,13 +491,13 @@ static void BuildQuery(PhysPt buf, bool with_modes, unsigned int &size) {
 		mem_writeb(t + 0x04, depth);
 		mem_writeb(t + 0x05, r.code);
 		mem_writew(t + 0x06, 0);                     /* not from the EEPROM */
-		mem_writew(t + 0x0C, 0);                     /* no interlace, double scan, ... */
+		mem_writew(t + 0x0C, r.dbl ? 0x100 : 0);     /* bit 8: double scan */
 		mem_writeb(t + 0x0E, (uint8_t)(r.htotal / 8 - 1));       /* CRTC_H_TOTAL */
 		mem_writeb(t + 0x0F, (uint8_t)(r.w / 8 - 1));            /* CRTC_H_DISP */
 		mem_writeb(t + 0x10, (uint8_t)(r.hss / 8 - 1));          /* CRTC_H_SYNC_STRT */
 		mem_writeb(t + 0x11, (uint8_t)((r.hsw / 8) | (r.hneg ? 0x20 : 0))); /* CRTC_H_SYNC_WID, _POL */
 		mem_writew(t + 0x12, (uint16_t)(r.vtotal - 1));          /* CRTC_V_TOTAL */
-		mem_writew(t + 0x14, (uint16_t)(r.h - 1));               /* CRTC_V_DISP */
+		mem_writew(t + 0x14, (uint16_t)((r.dbl ? 2u * r.h : r.h) - 1)); /* CRTC_V_DISP (scan lines) */
 		mem_writew(t + 0x16, (uint16_t)(r.vss - 1));             /* CRTC_V_SYNC_STRT */
 		mem_writeb(t + 0x18, (uint8_t)(r.vsw | (r.vneg ? 0x20 : 0))); /* CRTC_V_SYNC_WID, _POL */
 		mem_writeb(t + 0x19, 3);                     /* CLOCK_CNTL: the programmable clock */

@@ -216,6 +216,12 @@ static void Mach64_CovHookPE(void) {
 			LOG_MSG("COV WATCHPE %s+%x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x stack %08x %08x %08x %08x %08x %08x %08x %08x",
 				wfile.c_str(), (unsigned)rva, (unsigned)reg_eax, (unsigned)reg_ebx, (unsigned)reg_ecx, (unsigned)reg_edx, (unsigned)reg_esi, (unsigned)reg_edi,
 				st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]);
+			for (int k = 1; k <= 3; k++) {
+				char str[160]; int n = 0;
+				for (; n < 150; n++) { uint32_t ph; if (!LinToPhys(st[k] + (uint32_t)n, ph)) break; const uint8_t c = phys_readb(ph); if (!c) break; str[n] = (c >= 32 && c < 127) ? (char)c : '.'; }
+				str[n] = 0;
+				LOG_MSG("COV WATCHPE   string arg %d: \"%s\"", k, str);
+			}
 		}
 	}
 	ring_count++;

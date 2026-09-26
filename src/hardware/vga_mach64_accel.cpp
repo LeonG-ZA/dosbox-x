@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include <stdlib.h>
 #include "dosbox.h"
 #include "logging.h"
 #include "vga.h"
@@ -674,10 +675,29 @@ static void Begin(void) {
 }
 
 static void StartFillOp(void) {
+	{   /* TEST HOOK (not for upstream): log the first fills */
+		static int n = -1;
+		if (n < 0) n = getenv("DOSBOX_X_M64TRACE") ? 600 : 0;
+		if (n > 0) {
+			n--;
+			LOG_MSG("M64FILL dst_off_pitch=%08x yx=%08x hw=%08x pixw=%08x mix=%08x src=%08x frgd=%08x sc_lr=%08x sc_tb=%08x dst_cntl=%08x wmsk=%08x",
+				(unsigned)R(M64_DST_OFF_PITCH), (unsigned)R(M64_DST_Y_X), (unsigned)R(M64_DST_HEIGHT_WIDTH), (unsigned)R(M64_DP_PIX_WIDTH), (unsigned)R(M64_DP_MIX),
+				(unsigned)R(M64_DP_SRC), (unsigned)R(M64_DP_FRGD_CLR), (unsigned)R(M64_SC_LEFT_RIGHT), (unsigned)R(M64_SC_TOP_BOTTOM), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_DP_WRITE_MSK));
+		}
+	}
 	Begin();
 	StartFill();
 	if (Scale3DFcn() == 1) Mach64_Scale_Begin();
 	if (A.busy && !A.source_host) RunToEnd();
+	if (getenv("DOSBOX_X_M64TRACE")) {   /* TEST HOOK */
+		static int n = 600;
+		if (n > 0) { n--;
+			LOG_MSG("M64FILL done sc %d-%d %d-%d dst %u,%u %ux%u busy=%d host=%d word@dst=%04x",
+				(int)R(M64_SC_LEFT), (int)R(M64_SC_RIGHT), (int)R(M64_SC_TOP), (int)R(M64_SC_BOTTOM),
+				(unsigned)R(M64_DST_X), (unsigned)R(M64_DST_Y), (unsigned)R(M64_DST_WIDTH), (unsigned)R(M64_DST_HEIGHT), (int)A.busy, (int)A.source_host,
+				(unsigned)(vga.mem.linear[((R(M64_DST_OFF_PITCH) & 0xFFFFF) * 8) & vga.mem.memmask] | (vga.mem.linear[(((R(M64_DST_OFF_PITCH) & 0xFFFFF) * 8) + 1) & vga.mem.memmask] << 8)));
+		}
+	}
 }
 
 static void StartLineOp(void) {

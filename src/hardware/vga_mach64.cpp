@@ -403,9 +403,86 @@ static void Mach64_EIPSample(void) {
 
 #include "vga_mach64_cov.cpp"   /* TEST HOOK (not for upstream) */
 
+/* TEST HOOK (not for upstream): DOSBOX_X_AUTOKEYS="ms:keys;ms:keys" types keys at
+ * those emulated times. keys: plain characters, {ENTER} {ESC} {TAB} {WIN+R}
+ * {ALT+F4} {WAIT} (one empty step). */
+#include "keyboard.h"
+#include <vector>
+#include <string>
+static void Mach64_AutoKeys(void) {
+	struct Ev { KBD_KEYS k; bool down; };
+	struct Step { double t; std::string keys; };
+	static bool parsed = false;
+	static std::vector<Step> steps;
+	static size_t next = 0;
+	static std::vector<Ev> q;
+	static size_t qp = 0;
+	if (!parsed) {
+		parsed = true;
+		const char *e = getenv("DOSBOX_X_AUTOKEYS");
+		std::string all = e ? e : "";
+		size_t p0 = 0;
+		while (p0 < all.size()) {
+			size_t q1 = all.find(';', p0); if (q1 == std::string::npos) q1 = all.size();
+			std::string it = all.substr(p0, q1 - p0);
+			size_t c = it.find(':');
+			if (c != std::string::npos) steps.push_back({ atof(it.substr(0, c).c_str()), it.substr(c + 1) });
+			p0 = q1 + 1;
+		}
+	}
+	if (qp < q.size()) {
+		const Ev &ev = q[qp++];
+		if (ev.k != KBD_NONE) KEYBOARD_AddKey(ev.k, ev.down);
+		return;
+	}
+	if (next >= steps.size() || PIC_FullIndex() < steps[next].t) return;
+	q.clear(); qp = 0;
+	const std::string &k = steps[next++].keys;
+	auto tap = [&](KBD_KEYS key, bool shift) {
+		if (shift) q.push_back({ KBD_leftshift, true });
+		q.push_back({ key, true }); q.push_back({ key, false });
+		if (shift) q.push_back({ KBD_leftshift, false });
+	};
+	for (size_t i = 0; i < k.size(); i++) {
+		const char ch = k[i];
+		if (ch == '{') {
+			size_t e2 = k.find('}', i); std::string n = k.substr(i + 1, e2 - i - 1); i = e2;
+			if (n == "ENTER") tap(KBD_enter, false);
+			else if (n == "ESC") tap(KBD_esc, false);
+			else if (n == "TAB") tap(KBD_tab, false);
+			else if (n == "WAIT") { for (int w = 0; w < 30; w++) q.push_back({ KBD_NONE, false }); }
+			else if (n == "WIN+R") { q.push_back({ KBD_lwindows, true }); tap(KBD_r, false); q.push_back({ KBD_lwindows, false }); }
+			else if (n == "ALT+F4") { q.push_back({ KBD_leftalt, true }); tap(KBD_f4, false); q.push_back({ KBD_leftalt, false }); }
+			continue;
+		}
+		if (ch >= 'a' && ch <= 'z') { static const KBD_KEYS L[26] = { KBD_a,KBD_b,KBD_c,KBD_d,KBD_e,KBD_f,KBD_g,KBD_h,KBD_i,KBD_j,KBD_k,KBD_l,KBD_m,KBD_n,KBD_o,KBD_p,KBD_q,KBD_r,KBD_s,KBD_t,KBD_u,KBD_v,KBD_w,KBD_x,KBD_y,KBD_z }; tap(L[ch - 'a'], false); }
+		else if (ch >= 'A' && ch <= 'Z') { static const KBD_KEYS L[26] = { KBD_a,KBD_b,KBD_c,KBD_d,KBD_e,KBD_f,KBD_g,KBD_h,KBD_i,KBD_j,KBD_k,KBD_l,KBD_m,KBD_n,KBD_o,KBD_p,KBD_q,KBD_r,KBD_s,KBD_t,KBD_u,KBD_v,KBD_w,KBD_x,KBD_y,KBD_z }; tap(L[ch - 'A'], true); }
+		else if (ch >= '1' && ch <= '9') tap((KBD_KEYS)(KBD_1 + (ch - '1')), false);
+		else if (ch == '0') tap(KBD_0, false);
+		else if (ch == ' ') tap(KBD_space, false);
+		else if (ch == '\\') tap(KBD_backslash, false);
+		else if (ch == ':') tap(KBD_semicolon, true);
+		else if (ch == '.') tap(KBD_period, false);
+		else if (ch == '"') tap(KBD_quote, true);
+		else if (ch == '~') tap(KBD_grave, true);
+		else if (ch == '-') tap(KBD_minus, false);
+		else if (ch == '_') tap(KBD_minus, true);
+	}
+	LOG_MSG("AUTOKEYS: typing '%s'", k.c_str());
+}
+
 void Mach64_AutoShot(void) {
 	Mach64_EIPSample();
 	Mach64_CovInit();
+	Mach64_AutoKeys();
+	if (getenv("DOSBOX_X_M64TRACE")) {   /* TEST HOOK: watch the visible screen */
+		static unsigned int fr = 0; static unsigned int last = 0xFFFFFFFF;
+		if (++fr % 70 == 0) {
+			const Bitu fb = (Bitu)(R(M64_CRTC_OFF_PITCH) & 0xFFFFF) * 8u;
+			unsigned int nz = 0; for (Bitu i = 0; i < 640 * 480 * 2; i += 4) if (vga.mem.linear[(fb + i) & vga.mem.memmask]) nz++;
+			if (nz != last) { LOG_MSG("M64 SCREEN t=%.0f nonzero=%u", PIC_FullIndex(), nz); last = nz; }
+		}
+	}
 	static bool parsed = false;
 	static double shots[16];
 	static unsigned int nshots = 0, next = 0;
@@ -429,6 +506,25 @@ void Mach64_AutoShot(void) {
 			LOG_MSG("M64 CURSOR gen_test=%08x off=%08x posn=%08x hvoff=%08x clr0=%08x clr1=%08x crtc_gen=%08x row32: %s",
 				(unsigned)R(M64_GEN_TEST_CNTL), (unsigned)R(M64_CUR_OFFSET), (unsigned)R(M64_CUR_HORZ_VERT_POSN), (unsigned)R(M64_CUR_HORZ_VERT_OFF),
 				(unsigned)R(M64_CUR_CLR0), (unsigned)R(M64_CUR_CLR1), (unsigned)R(M64_CRTC_GEN_CNTL), hex);
+			{
+				const uint32_t op = R(M64_CRTC_OFF_PITCH);
+				const Bitu fb = (Bitu)(op & 0xFFFFF) * 8u;
+				char px[200]; size_t pn = 0;
+				for (unsigned int i = 0; i < 16; i++) pn += (size_t)snprintf(px + pn, sizeof(px) - pn, "%02x", vga.mem.linear[(fb + 640 * 2 * 100 + 200 + i) & vga.mem.memmask]);
+				unsigned int nz = 0; for (Bitu i = 0; i < 640 * 480 * 2; i++) if (vga.mem.linear[(fb + i) & vga.mem.memmask]) nz++;
+				LOG_MSG("M64 SCAN off_pitch=%08x htd=%08x vtd=%08x dac=%08x gen_test=%08x mem_cntl=%08x draw %ux%u line100: %s nonzero=%u pel_mask=%02x",
+					(unsigned)op, (unsigned)R(M64_CRTC_H_TOTAL_DISP), (unsigned)R(M64_CRTC_V_TOTAL_DISP), (unsigned)R(M64_DAC_CNTL), (unsigned)R(M64_GEN_TEST_CNTL), (unsigned)R(M64_MEM_CNTL),
+					(unsigned)vga.draw.width, (unsigned)vga.draw.height, px, nz, (unsigned)vga.dac.pel_mask);
+				char blk[400]; size_t bn = 0;
+				for (Bitu bb = 0; bb < vga.mem.memsize; bb += 0x40000) { unsigned int c = 0; for (Bitu i = 0; i < 0x40000; i++) if (vga.mem.linear[bb + i]) c++; bn += (size_t)snprintf(blk + bn, sizeof(blk) - bn, " %u", c); }
+				LOG_MSG("M64 SCAN nonzero per 256K:%s", blk);
+				for (unsigned int c = 0; c < 4; c++) {
+					const Bitu ca = vga.mem.memsize - (c + 1) * 256;
+					char cx[300]; size_t cn = 0;
+					for (unsigned int d = 0; d < 30; d++) { uint32_t v; memcpy(&v, &vga.mem.linear[ca + d * 4], 4); cn += (size_t)snprintf(cx + cn, sizeof(cx) - cn, " %08x", v); }
+					LOG_MSG("M64 CONTEXT %u @%06x:%s", c, (unsigned)ca, cx);
+				}
+			}
 		}
 		next++;
 	}
