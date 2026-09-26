@@ -322,7 +322,7 @@ unsigned int Mach64_INT10_GetBank(void) {
 /* Resolution codes (AL=0, CH) and the CRTC timings the mode tables report
  * (VESA DMT 60 Hz timings; [BK A-20] mode table layout). Horizontal values
  * in pixels, vertical in scan lines, dot clock in 10 kHz. The low resolution
- * codes E1h-E5h [PRG-215R3 A-2] are double scanned where the height is below
+ * codes E3h-E5h [PRG-215R3 A-2] are double scanned where the height is below
  * 350 (vertical values then count scan lines, as in atyfb): Wipeout's 3D
  * Rage edition asks DirectDraw for 320x240, 400x300 and 512x384. */
 struct Mach64_Res {
@@ -331,15 +331,15 @@ struct Mach64_Res {
 	bool hneg, vneg, dbl;
 };
 static const Mach64_Res mach64_res[] = {
-	{ 0xE2,  320,  200,  400,  328,  48,  449,  412, 2,  1259, true,  false, true  },
-	{ 0xE3,  320,  240,  400,  328,  48,  525,  490, 2,  1259, true,  true,  true  },
-	{ 0xE5,  400,  300,  528,  424,  64,  628,  601, 4,  2000, false, false, true  },
-	{ 0xE4,  512,  384,  672,  528,  64,  806,  771, 6,  3250, true,  true,  true  },
-	{ 0xE1,  640,  400,  800,  656,  96,  449,  412, 2,  2518, true,  false, false },
 	{ 0x12,  640,  480,  800,  656,  96,  525,  490, 2,  2518, true,  true,  false },
 	{ 0x6A,  800,  600, 1056,  840, 128,  628,  601, 4,  4000, false, false, false },
 	{ 0x55, 1024,  768, 1344, 1048, 136,  806,  771, 6,  6500, true,  true,  false },
 	{ 0x83, 1280, 1024, 1688, 1328, 112, 1066, 1025, 3, 10800, false, false, false },
+	/* after the standard ones (seven tables in all, [PRG-215R3 A-32]: "typically
+	 * between 2 and 7"); 640x480 must stay first */
+	{ 0xE3,  320,  240,  400,  328,  48,  525,  490, 2,  1259, true,  true,  true  },
+	{ 0xE5,  400,  300,  528,  424,  64,  628,  601, 4,  2000, false, false, true  },
+	{ 0xE4,  512,  384,  672,  528,  64,  806,  771, 6,  3250, true,  true,  true  },
 };
 
 /* A000h: program the accelerator CRTC [PRG-215R3 A-2] from the built-in
