@@ -33,12 +33,14 @@ struct CovSeg {
 	unsigned int segnum;
 	std::vector<uint8_t> data;   /* file bytes of the segment */
 	std::vector<uint8_t> hit;
+	bool pe = false;             /* 32-bit PE module: data is the image by RVA */
+	uint32_t exe_base = 0;       /* an EXE (not a DLL): always at its ImageBase */
 };
 
 std::vector<CovSeg> segs;
 std::unordered_map<uint64_t, int> by_base;   /* (base, limit) -> segment or -1 */
 bool parsed = false;
-struct RingEnt { int seg; uint16_t ip; uint64_t n; };
+struct RingEnt { int seg; uint32_t ip; uint64_t n; };
 RingEnt ring[256];
 unsigned int ring_pos = 0;
 uint64_t ring_count = 0;
@@ -76,6 +78,34 @@ void LoadNE(const std::string &fn) {
 	LOG_MSG("COV: %s loaded", fn.c_str());
 }
 
+/* PE modules: the image laid out by RVA; code pages are recognised by content */
+void LoadPE(const std::string &fn) {
+	FILE *f = fopen(fn.c_str(), "rb");
+	if (!f) { LOG_MSG("COV: cannot open %s", fn.c_str()); return; }
+	std::vector<uint8_t> d; uint8_t buf[65536]; size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) d.insert(d.end(), buf, buf + n);
+	fclose(f);
+	const uint32_t pe = rd32(d, 0x3c);
+	if (pe + 0xF8 > d.size() || d[pe] != 'P' || d[pe + 1] != 'E') { LOG_MSG("COV: %s is not PE", fn.c_str()); return; }
+	const unsigned int nsec = rd16(d, pe + 6), optsz = rd16(d, pe + 0x14);
+	const uint32_t imgsize = rd32(d, pe + 0x18 + 0x38);
+	CovSeg s;
+	const size_t slash = fn.find_last_of("/\\");
+	s.file = (slash == std::string::npos) ? fn : fn.substr(slash + 1);
+	s.segnum = 0; s.pe = true;
+	if (!(rd16(d, pe + 0x16) & 0x2000)) s.exe_base = rd32(d, pe + 0x18 + 0x1C);
+	s.data.assign(imgsize, 0); s.hit.assign(imgsize, 0);
+	const uint32_t hdr = rd32(d, pe + 0x18 + 0x3C);
+	for (uint32_t i = 0; i < hdr && i < d.size() && i < imgsize; i++) s.data[i] = d[i];
+	for (unsigned int i = 0; i < nsec; i++) {
+		const uint32_t sh = pe + 0x18 + optsz + i * 40;
+		const uint32_t va = rd32(d, sh + 12), rawsz = rd32(d, sh + 16), raw = rd32(d, sh + 20);
+		for (uint32_t k = 0; k < rawsz && raw + k < d.size() && va + k < imgsize; k++) s.data[va + k] = d[raw + k];
+	}
+	segs.push_back(std::move(s));
+	LOG_MSG("COV: %s loaded (PE, %x bytes)", fn.c_str(), (unsigned)imgsize);
+}
+
 bool LinToPhys(uint32_t lin, uint32_t &phys) {
 	if (!paging.enabled) { phys = lin; return true; }
 	const uint32_t pde = phys_readd((paging.cr3 & 0xFFFFF000u) + ((lin >> 22) << 2));
@@ -90,6 +120,7 @@ bool LinToPhys(uint32_t lin, uint32_t &phys) {
 int Identify(uint32_t base, uint32_t limit) {
 	for (size_t i = 0; i < segs.size(); i++) {
 		const CovSeg &s = segs[i];
+		if (s.pe) continue;
 		if ((size_t)limit + 1 < s.data.size() || (size_t)limit + 1 > s.data.size() + 0x1000) continue;
 		unsigned int same = 0, total = 0;
 		for (uint32_t o = 0; o < 64 && o < s.data.size(); o++) {
@@ -115,14 +146,88 @@ void Mach64_CovInit(void) {
 	while (p <= list.size()) {
 		size_t q = list.find(';', p);
 		if (q == std::string::npos) q = list.size();
-		if (q > p) LoadNE(list.substr(p, q - p));
+		if (q > p) {
+			const std::string fn = list.substr(p, q - p);
+			FILE *t = fopen(fn.c_str(), "rb"); uint8_t hd[0x40] = {0}; uint32_t pe = 0; uint8_t sig[2] = {0};
+			if (t) { if (fread(hd, 1, 0x40, t) == 0x40) { pe = hd[0x3c] | (hd[0x3d] << 8) | (hd[0x3e] << 16) | ((uint32_t)hd[0x3f] << 24); fseek(t, (long)pe, SEEK_SET); if (fread(sig, 1, 2, t) != 2) sig[0] = 0; } fclose(t); }
+			if (sig[0] == 'P' && sig[1] == 'E') LoadPE(fn); else LoadNE(fn);
+		}
 		p = q + 1;
 	}
 	mach64_cov_on = !segs.empty();
 }
 
+static std::unordered_map<uint32_t, int64_t> pe_pages;   /* linear page -> (seg << 32) | rva page, or -1 */
+
+static int64_t IdentifyPEPage(uint32_t lin_page) {
+	for (size_t si = 0; si < segs.size(); si++) {
+		const CovSeg &s = segs[si];
+		if (s.pe && s.exe_base && lin_page >= s.exe_base && lin_page < s.exe_base + s.data.size())
+			return ((int64_t)si << 32) | (int64_t)(lin_page - s.exe_base);
+	}
+	uint8_t cur[64];
+	for (unsigned int i = 0; i < 64; i++) {
+		uint32_t p;
+		if (!LinToPhys(lin_page + i, p)) return -2;
+		cur[i] = phys_readb(p);
+	}
+	for (size_t si = 0; si < segs.size(); si++) {
+		const CovSeg &s = segs[si];
+		if (!s.pe) continue;
+		for (size_t rva = 0x1000; rva + 64 <= s.data.size(); rva += 0x1000) {
+			unsigned int same = 0, nz = 0;
+			for (unsigned int i = 0; i < 64; i++) { if (s.data[rva + i]) nz++; if (s.data[rva + i] == cur[i]) same++; }
+			if (nz >= 16 && same >= 60) return ((int64_t)si << 32) | (int64_t)rva;
+		}
+	}
+	return -1;
+}
+
+static void Mach64_CovHookPE(void) {
+	const uint32_t lin = (uint32_t)SegPhys(cs) + reg_eip, page = lin & ~0xFFFu;
+	static uint32_t last_page = 1; static int64_t last_v = -1;
+	int64_t v;
+	if (page == last_page) v = last_v;
+	else {
+		auto it = pe_pages.find(page);
+		if (it == pe_pages.end()) {
+			v = IdentifyPEPage(page);
+			if (v == -2) return;
+			pe_pages[page] = v;
+			if (v >= 0) LOG_MSG("COV: page %08x = %s rva %x", (unsigned)page, segs[(size_t)(v >> 32)].file.c_str(), (unsigned)(v & 0xFFFFFFFF));
+		}
+		else v = it->second;
+		last_page = page; last_v = v;
+	}
+	if (v < 0) return;
+	const int idx = (int)(v >> 32);
+	const uint32_t rva = (uint32_t)(v & 0xFFFFFFFF) + (lin & 0xFFF);
+	if (rva < segs[idx].hit.size()) segs[idx].hit[rva] = 1;
+	{   /* DOSBOX_X_COVWATCHPE="FILE:rva[,rva...]" logs registers and the stack at those instructions (first 8 times each) */
+		static bool parsed = false; static std::string wfile; static std::vector<uint32_t> wr; static std::unordered_map<uint32_t, int> cnt;
+		if (!parsed) {
+			parsed = true;
+			const char *w = getenv("DOSBOX_X_COVWATCHPE");
+			if (w) { std::string t(w); size_t c = t.find(':'); if (c != std::string::npos) { wfile = t.substr(0, c); std::string r = t.substr(c + 1); size_t p0 = 0; while (p0 < r.size()) { size_t q = r.find(',', p0); if (q == std::string::npos) q = r.size(); wr.push_back((uint32_t)strtoul(r.substr(p0, q - p0).c_str(), NULL, 16)); p0 = q + 1; } } }
+		}
+		if (!wr.empty() && segs[idx].file == wfile) for (uint32_t x : wr) if (x == rva && cnt[x]++ < 8) {
+			const uint32_t sp = (uint32_t)SegPhys(ss) + reg_esp; uint32_t st[8];
+			for (int k = 0; k < 8; k++) { st[k] = 0; for (int b = 0; b < 4; b++) { uint32_t ph; if (LinToPhys(sp + (uint32_t)k * 4 + (uint32_t)b, ph)) st[k] |= (uint32_t)phys_readb(ph) << (8 * b); } }
+			LOG_MSG("COV WATCHPE %s+%x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x stack %08x %08x %08x %08x %08x %08x %08x %08x",
+				wfile.c_str(), (unsigned)rva, (unsigned)reg_eax, (unsigned)reg_ebx, (unsigned)reg_ecx, (unsigned)reg_edx, (unsigned)reg_esi, (unsigned)reg_edi,
+				st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]);
+		}
+	}
+	ring_count++;
+	RingEnt &last = ring[(ring_pos + 255) & 255];
+	if (last.seg == idx && last.ip == rva) return;
+	ring[ring_pos] = { idx, rva, ring_count };
+	ring_pos = (ring_pos + 1) & 255;
+}
+
 void Mach64_CovHook(void) {
-	if (!cpu.pmode || (reg_flags & FLAG_VM) || cpu.code.big) return;
+	if (!cpu.pmode || (reg_flags & FLAG_VM)) return;
+	if (cpu.code.big) { Mach64_CovHookPE(); return; }
 	const uint32_t base = (uint32_t)SegPhys(cs), limit = (uint32_t)Segs.limit[cs];
 	const uint64_t key = ((uint64_t)base << 32) | limit;
 	auto it = by_base.find(key);
@@ -151,8 +256,8 @@ void Mach64_CovHook(void) {
 	ring_count++;
 	/* keep only the latest visit of a (seg, ip) run so loops show up once per turn */
 	RingEnt &last = ring[(ring_pos + 255) & 255];
-	if (last.seg == idx && last.ip == (uint16_t)ip) return;
-	ring[ring_pos] = { idx, (uint16_t)ip, ring_count };
+	if (last.seg == idx && last.ip == ip) return;
+	ring[ring_pos] = { idx, ip, ring_count };
 	ring_pos = (ring_pos + 1) & 255;
 }
 

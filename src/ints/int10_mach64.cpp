@@ -425,7 +425,9 @@ static VGAModes ModeTypeOfDepth(unsigned int cl) {
 
 /* ASIC identification for the query functions: [7:0] revision, [15:8] type */
 static uint16_t AsicID(void) {
-	return 0x4740;   /* 'G' (GT), ASIC ID 40h */
+	/* 4700h = GT-A2 [PRG-215R3 table A-6]; ATI's driver (macxw4.drv 4.35) only
+	 * reports 3D (ATI3DCIF) for the IDs in that table */
+	return 0x4700;
 }
 
 static uint8_t MemSizeCode(void) {
