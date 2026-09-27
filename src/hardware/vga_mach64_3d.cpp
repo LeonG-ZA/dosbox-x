@@ -80,9 +80,9 @@ void Mach64_3D_TrapBegin(void) {
 		static int on = -1; if (on < 0) on = getenv("DOSBOX_X_M64STATE") ? 1 : 0;
 		if (on) {
 			static std::set<std::string> seen; char k[200];
-			snprintf(k, sizeof(k), "3dcntl=%08x pixw=%08x clrcmp_cntl=%08x clr=%08x msk=%08x texsz=%08x zcntl=%08x alpha_start=%08x",
+			snprintf(k, sizeof(k), "3dcntl=%08x pixw=%08x clrcmp_cntl=%08x clr=%08x msk=%08x texsz=%08x zcntl=%08x alpha_start=%08x dstcntl=%08x tex6=%08x",
 				(unsigned)R(M64_SCALE_3D_CNTL), (unsigned)R(M64_DP_PIX_WIDTH), (unsigned)R(M64_CLR_CMP_CNTL), (unsigned)R(M64_CLR_CMP_CLR),
-				(unsigned)R(M64_CLR_CMP_MSK), (unsigned)R(M64_TEX_SIZE_PITCH), (unsigned)R(M64_Z_CNTL), (unsigned)R(M64_ALPHA_START));
+				(unsigned)R(M64_CLR_CMP_MSK), (unsigned)R(M64_TEX_SIZE_PITCH), (unsigned)R(M64_Z_CNTL), (unsigned)R(M64_ALPHA_START), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_TEX_0_OFF + 6));
 			if (seen.size() < 400 && seen.insert(k).second) LOG_MSG("M64STATE %s", k);
 		}
 	}

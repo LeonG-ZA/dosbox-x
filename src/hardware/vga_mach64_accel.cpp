@@ -186,7 +186,11 @@ static inline uint32_t Mix(int fn, uint32_t s, uint32_t d) {
 /* colour compare [RRG 4-100]: true = keep the destination */
 static bool ColourCompare(uint32_t src, uint32_t dst, bool texel_src, uint32_t texel) {
 	const uint32_t cntl = R(M64_CLR_CMP_CNTL);
-	const uint32_t msk = R(M64_CLR_CMP_MSK);
+	/* against the destination only the pixel's bits take part: drivers write the 16 bpp key and mask
+	 * replicated into both halves (F83EF83Eh), as for the other colour registers */
+	const int pb = PixBits(A.dst_size);
+	const uint32_t pmask = (((cntl >> 24) & 3) != 0 || pb >= 32) ? 0xFFFFFFFFu : ((1u << pb) - 1);
+	const uint32_t msk = R(M64_CLR_CMP_MSK) & pmask;
 	const uint32_t clr = R(M64_CLR_CMP_CLR) & msk;
 	uint32_t v;
 	switch ((cntl >> 24) & 3) {
@@ -619,6 +623,11 @@ static void TrapezoidRun(void) {
 						 * a keyed mask, then a filtered pass only where the mask colour is */
 						const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
 						if (!keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out)) {
+							/* DP_SRC FRGD_SRC [RRG 4-94]: 5 = the 3D/scaler data; 0/1 put the
+							 * BKGD/FRGD colour where the texel passed (ATI3DCIF's sprite mask) */
+							const unsigned int fsrc = (R(M64_DP_SRC) >> 8) & 7;
+							if (fsrc == 0) out = R(M64_DP_BKGD_CLR);
+							else if (fsrc == 1) out = R(M64_DP_FRGD_CLR);
 							const uint32_t wm = R(M64_DP_WRITE_MSK);
 							Mach64_WritePixel(addr, A.dst_size, (out & wm) | (dst & ~wm));
 						}
