@@ -158,6 +158,8 @@ static uint32_t Mach64_Block1Mask(unsigned int reg) {
 		case 0x0A:                      return 0x03FF03FF;
 		case 0x0B:                      return 0x000000F2;
 		case 0x0C:                      return 0x03FF0000;
+		case 0x0D: case 0x0E:           return 0x003FFFFF;   /* Rage II SCALER_BUF0/1_OFFSET (86Box) */
+		case 0x0F:                      return 0x00000FFF;   /* Rage II SCALER_BUF_PITCH (86Box) */
 		case 0x10: case 0x11:           return 0x03FF03FF;
 		case 0x12:                      return 0xF00F000F;
 		case 0x13:                      return 0x0000FF5F;
@@ -330,6 +332,74 @@ uint8_t *Mach64_DrawLine(Bitu vidstart, Bitu line, uint8_t *templine) {
 			break;
 	}
 
+	/* Video overlay / scaler [RRG 5-18..5-22]: SCALER_HEIGHT_WIDTH source pixels
+	 * scaled by OVERLAY_SCALE_INC (4.12 fixed point source steps per display
+	 * pixel) into the OVERLAY_Y_X_START..END window. Rage I reads the buffer
+	 * from BUF0_OFFSET/BUF0_PITCH; the Rage II driver uses SCALER_BUF0_OFFSET
+	 * (1_0D, bytes) and SCALER_BUF_PITCH (1_0F, pixels) instead (86Box). Point
+	 * sampled; KEY_CNTL CMP_MIX 1 = graphics, 2 = video, otherwise video where
+	 * the graphics key function is true. */
+	if ((R(M64_OVERLAY_SCALE_CNTL) & 0xC0000000u) == 0xC0000000u) {
+		const uint32_t st = R(M64_OVERLAY_Y_X_START), en = R(M64_OVERLAY_Y_X_END);
+		const int x0 = (int)((st >> 16) & 0x7FF), y0 = (int)(st & 0x7FF);
+		const int x1 = (int)((en >> 16) & 0x7FF), y1 = (int)(en & 0x7FF);
+		const uint32_t kc = R(M64_OVERLAY_KEY_CNTL);
+		const unsigned int mix = (kc >> 8) & 0xF, gfn = (kc >> 4) & 7;
+		if (mix != 1 && (int)line >= y0 && (int)line <= y1) {
+			const uint32_t inc = R(M64_OVERLAY_SCALE_INC);
+			const uint32_t hinc = inc >> 16, vinc = inc & 0xFFFF;
+			const uint32_t hw = R(M64_SCALER_HEIGHT_WIDTH);
+			const uint32_t sw = (hw >> 16) & 0x3FF, sh = hw & 0x3FF;
+			Bitu base, pitch;
+			if (mach64_rage2) { base = R(0x10D) & 0x3FFFFF; pitch = R(0x10F) & 0xFFF; }
+			else { base = R(M64_BUF0_OFFSET) & 0x3FFFF8; pitch = R(M64_BUF0_PITCH) & 0xFFF; }
+			const unsigned int fmt = (R(M64_VIDEO_FORMAT) >> 16) & 0xF;
+			const uint32_t sy = (uint32_t)(((uint64_t)((int)line - y0) * vinc) >> 12);
+			const uint32_t gk = R(M64_OVERLAY_GRAPHICS_KEY_CLR), gm = R(M64_OVERLAY_GRAPHICS_KEY_MSK);
+			if (sy < sh) for (int x = x0; x <= x1 && x < (int)width; x++) {
+				if (x < 0) continue;
+				bool show = (mix == 2);
+				if (!show) {
+					uint32_t g = 0; const Bitu ga = vidstart;
+					switch (pw) {
+						case M64_PIX_15BPP: case M64_PIX_16BPP: g = mem[(ga + (Bitu)x * 2) & mask] | (mem[(ga + (Bitu)x * 2 + 1) & mask] << 8); break;
+						case M64_PIX_24BPP: g = mem[(ga + (Bitu)x * 3) & mask] | (mem[(ga + (Bitu)x * 3 + 1) & mask] << 8) | (mem[(ga + (Bitu)x * 3 + 2) & mask] << 16); break;
+						case M64_PIX_32BPP: g = mem[(ga + (Bitu)x * 4) & mask] | (mem[(ga + (Bitu)x * 4 + 1) & mask] << 8) | (mem[(ga + (Bitu)x * 4 + 2) & mask] << 16); break;
+						default: g = mem[(ga + (Bitu)x) & mask]; break;
+					}
+					const bool eq = (g & gm) == (gk & gm);
+					show = gfn == 1 || (gfn == 4 && !eq) || (gfn == 5 && eq);
+				}
+				if (!show) continue;
+				const uint32_t sx = (uint32_t)(((uint64_t)(x - x0) * hinc) >> 12);
+				if (sx >= sw) break;
+				int r = 0, g = 0, b = 0;
+				if (fmt == 0xB || fmt == 0xC) {
+					/* YUV422: YUYV (0xB) or UYVY (0xC) byte order, BT.601 */
+					const Bitu pa = base + ((Bitu)sy * pitch + (sx & ~1u)) * 2;
+					const uint8_t b0 = mem[pa & mask], b1 = mem[(pa + 1) & mask], b2 = mem[(pa + 2) & mask], b3 = mem[(pa + 3) & mask];
+					int yy, u, v;
+					if (fmt == 0xB) { yy = (sx & 1) ? b2 : b0; u = b1; v = b3; }
+					else { yy = (sx & 1) ? b3 : b1; u = b0; v = b2; }
+					u -= 128; v -= 128;
+					r = yy + ((359 * v) >> 8); g = yy - ((88 * u + 183 * v) >> 8); b = yy + ((454 * u) >> 8);
+				}
+				else if (fmt == 3 || fmt == 4) {
+					const Bitu pa = base + ((Bitu)sy * pitch + sx) * 2;
+					const unsigned int pv = mem[pa & mask] | (mem[(pa + 1) & mask] << 8);
+					if (fmt == 3) { r = ((pv >> 10) & 31) << 3; g = ((pv >> 5) & 31) << 3; b = (pv & 31) << 3; }
+					else { r = ((pv >> 11) & 31) << 3; g = ((pv >> 5) & 63) << 2; b = (pv & 31) << 3; }
+				}
+				else if (fmt == 6) {
+					const Bitu pa = base + ((Bitu)sy * pitch + sx) * 4;
+					r = mem[(pa + 2) & mask]; g = mem[(pa + 1) & mask]; b = mem[pa & mask];
+				}
+				r = r < 0 ? 0 : r > 255 ? 255 : r; g = g < 0 ? 0 : g > 255 ? 255 : g; b = b < 0 ? 0 : b > 255 ? 255 : b;
+				out[x] = Mach64_HostRGB((unsigned)r, (unsigned)g, (unsigned)b);
+			}
+		}
+	}
+
 	/* Hardware cursor [RRG 4-33]: 64x64, 2 bits per pixel, 16 bytes per
 	 * row, "reverse pixel order within each byte" (pixel 0 in bits 1:0).
 	 * 00 = colour 0, 01 = colour 1, 10 = transparent, 11 = invert.
@@ -376,7 +446,8 @@ static void Mach64_EIPSample(void) {
 	static int enabled = -1;
 	static unsigned int frame = 0;
 	if (enabled < 0) enabled = getenv("DOSBOX_X_EIPSAMPLE") ? 1 : 0;
-	if (!enabled || (++frame % 30) != 0) return;
+	static int every = 0; if (!every) { const char *ev = getenv("DOSBOX_X_EIPSAMPLE"); every = (ev && atoi(ev) > 0) ? atoi(ev) : 30; }
+	if (!enabled || (++frame % (unsigned)every) != 0) return;
 	/* DOSBOX_X_MEMDUMP=start,len,file: dump guest linear memory once, 60 s in */
 	static bool dumped = false;
 	const char *md = getenv("DOSBOX_X_MEMDUMP");
@@ -533,6 +604,15 @@ void Mach64_AutoShot(void) {
 }
 
 void Mach64_VerticalRetrace(void) {
+	{   /* TEST HOOK: DOSBOX_X_M64VRAMOUT rewrites raw video memory plus the register file every 2 s */
+		static int on = -1; static double last = 0;
+		if (on < 0) on = getenv("DOSBOX_X_M64VRAMOUT") ? 1 : 0;
+		if (on && PIC_FullIndex() - last >= 2000.0) {
+			last = PIC_FullIndex();
+			FILE *v = fopen(getenv("DOSBOX_X_M64VRAMOUT"), "wb");
+			if (v) { fwrite(vga.mem.linear, 1, vga.mem.memsize, v); fwrite(mach64.reg, 1, sizeof(mach64.reg), v); fclose(v); }
+		}
+	}
 	if (!Mach64_Present()) return;
 	/* CRTC_VBLANK_INT latches at the vertical blank [RRG 4-26]. No interrupt
 	 * is delivered: the PCI function reports no interrupt pin. */
@@ -704,7 +784,7 @@ struct M64Ring {
 		return !buf.empty();
 	}
 	void add(bool w, uint32_t reg, uint32_t val, uint32_t mask) { const uint32_t pc = (uint32_t)SegPhys(cs) + (uint32_t)reg_eip;
-		if (pos || full) { E &l = buf[pos ? pos - 1 : buf.size() - 1]; if (l.w == w && l.reg == reg && l.val == val && l.mask == mask && l.pc == pc) { l.n++; return; } }
+		for (size_t k = 1; k <= 4 && (k <= pos || full); k++) { E &l = buf[(pos + buf.size() - k) % buf.size()]; if (l.w == w && l.reg == reg && (!w || l.val == val) && l.mask == mask && l.pc == pc) { l.n++; l.val = val; return; } }   /* polling loops (reads: last value kept) */
 		buf[pos] = { reg, val, mask, pc, 1, w }; if (++pos == buf.size()) { pos = 0; full = true; } }
 	~M64Ring() {
 		if (buf.empty()) return;

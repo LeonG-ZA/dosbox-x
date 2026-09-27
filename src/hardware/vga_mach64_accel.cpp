@@ -614,7 +614,11 @@ static void TrapezoidRun(void) {
 					const uint32_t dst = Mach64_ReadPixel(addr, A.dst_size);
 					if (use3d) {
 						uint32_t out;
-						if (Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out)) {
+						/* colour compare on the destination [RRG 4-100] (the texel source,
+						 * CLR_CMP_SRC 2, is tested in Mach64_3D_Pixel). ATI3DCIF sprites draw
+						 * a keyed mask, then a filtered pass only where the mask colour is */
+						const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
+						if (!keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out)) {
 							const uint32_t wm = R(M64_DP_WRITE_MSK);
 							Mach64_WritePixel(addr, A.dst_size, (out & wm) | (dst & ~wm));
 						}
@@ -845,6 +849,22 @@ void Mach64_Accel_Write(unsigned int reg, uint32_t val, uint32_t mask) {
 		return;
 	}
 
+	if (reg == M64_DST_X_Y || reg == M64_DST_WIDTH_HEIGHT) {
+		/* Rage II: X/width in 15:0, Y/height in 31:16 (not in RRG-G02700; 86Box). The
+		 * GT-B driver uses them for host-data blits after DP_SET_GUI_ENGINE. */
+		if (!mach64_rage2) return;
+		if (reg == M64_DST_X_Y) {
+			Store(M64_DST_X, val, mask, 0x1FFF);
+			Store(M64_DST_Y, val >> 16, mask >> 16, 0x7FFF);
+		}
+		else {
+			Store(M64_DST_WIDTH, val, mask, 0xFFFF);
+			Store(M64_DST_BRES_LNTH, val, mask, 0x1FFF);
+			Store(M64_DST_HEIGHT, val >> 16, mask >> 16, 0x7FFF);
+			if (top) StartFillOp();
+		}
+		return;
+	}
 	if (reg == M64_TEX_PALETTE) {
 		/* Rage II CI4/CI8 texture palette, separate from the display DAC. Not in
 		 * RRG-G02700; format from 86Box (ATI Windows 95 HAL uploads). */
@@ -868,7 +888,7 @@ void Mach64_Accel_Write(unsigned int reg, uint32_t val, uint32_t mask) {
 		Store(M64_SC_TOP, 0, F, 0x7FFF); Store(M64_SC_BOTTOM, 0x3FFF, F, 0x7FFF);
 		Store(M64_SC_LEFT, 0, F, 0x1FFF); Store(M64_SC_RIGHT, 0x0FFF, F, 0x1FFF);   /* 86Box: 1FFFh, but the scissors are signed here */
 		Store(M64_DP_WRITE_MSK, F, F, F);
-		Store(M64_CLR_CMP_CLR, 0, F, F);
+		Store(M64_CLR_CMP_CLR, 0, F, F); Store(M64_CLR_CMP_CNTL, 0, F, 0x03000007);   /* colour compare off (ref/86gptbox) */
 		Store(M64_SRC_CNTL, R(M64_SRC_CNTL) & ~((3u << 13) | (1u << 5) | (1u << 12)), F, 0x0000609F);
 		Store(M64_DST_CNTL, R(M64_DST_CNTL) & ~(7u << 13), F, 0x0002FFFF);
 		uint32_t pw = R(M64_DP_PIX_WIDTH) & (1u << 13);

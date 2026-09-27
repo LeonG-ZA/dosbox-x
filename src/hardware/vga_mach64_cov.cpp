@@ -285,6 +285,14 @@ void Mach64_CovHook(void) {
 				char spw[80]; size_t sn2 = 0;
 				for (int k = 0; k < 8; k++) { uint16_t w = 0; for (int q = 0; q < 2; q++) { uint32_t ph; if (LinToPhys((uint32_t)SegPhys(ss) + (uint16_t)(reg_sp + k * 2 + q), ph)) w |= (uint16_t)(phys_readb(ph) << (8 * q)); } sn2 += (size_t)snprintf(spw + sn2, sizeof(spw) - sn2, " %04x", w); }
 				LOG_MSG("COV WATCH   dx=%04x [sp..]:%s", (unsigned)reg_dx, spw);
+				{   /* DOSBOX_X_COVDUMPES=len: hex dump es:0000..len */
+					const char *de = getenv("DOSBOX_X_COVDUMPES"); const unsigned int dl = de ? (unsigned)strtoul(de, NULL, 16) : 0;
+					for (unsigned int o = 0; o < dl; o += 32) {
+						char hx[80]; size_t hn = 0;
+						for (unsigned int k = 0; k < 32; k++) { uint32_t ph; uint8_t c = 0; if (LinToPhys((uint32_t)SegPhys(es) + o + k, ph)) c = phys_readb(ph); hn += (size_t)snprintf(hx + hn, sizeof(hx) - hn, "%02x", c); }
+						LOG_MSG("COV WATCH   es:%04x %s", o, hx);
+					}
+				}
 				LOG_MSG("COV WATCH %s %u:%04x ax=%04x es:bx=%04x:%04x bytes %s [bp+4..]:%s", segs[idx].file.c_str(), segs[idx].segnum, ip, (unsigned)reg_ax, (unsigned)SegValue(es), (unsigned)reg_bx, mm, bpw);
 			}
 			uint32_t pds = 0; const bool okp = LinToPhys((uint32_t)SegPhys(ds) + 0xF10, pds);

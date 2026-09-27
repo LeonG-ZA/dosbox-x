@@ -24,6 +24,8 @@
 #include <math.h>
 
 #include "dosbox.h"
+#include <set>
+#include <string>
 #include "logging.h"
 #include "vga.h"
 #include "vga_mach64.h"
@@ -74,6 +76,16 @@ static struct {
 static inline int64_t sx(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
 
 void Mach64_3D_TrapBegin(void) {
+	{   /* TEST HOOK: DOSBOX_X_M64STATE=1 logs each new 3D state combination once */
+		static int on = -1; if (on < 0) on = getenv("DOSBOX_X_M64STATE") ? 1 : 0;
+		if (on) {
+			static std::set<std::string> seen; char k[200];
+			snprintf(k, sizeof(k), "3dcntl=%08x pixw=%08x clrcmp_cntl=%08x clr=%08x msk=%08x texsz=%08x zcntl=%08x alpha_start=%08x",
+				(unsigned)R(M64_SCALE_3D_CNTL), (unsigned)R(M64_DP_PIX_WIDTH), (unsigned)R(M64_CLR_CMP_CNTL), (unsigned)R(M64_CLR_CMP_CLR),
+				(unsigned)R(M64_CLR_CMP_MSK), (unsigned)R(M64_TEX_SIZE_PITCH), (unsigned)R(M64_Z_CNTL), (unsigned)R(M64_ALPHA_START));
+			if (seen.size() < 400 && seen.insert(k).second) LOG_MSG("M64STATE %s", k);
+		}
+	}
 	P.r.v = sx(M64_RED_START, 25);   P.r.xinc = sx(M64_RED_X_INC, 25);   P.r.yinc = sx(M64_RED_Y_INC, 25);
 	P.g.v = sx(M64_GREEN_START, 25); P.g.xinc = sx(M64_GREEN_X_INC, 25); P.g.yinc = sx(M64_GREEN_Y_INC, 25);
 	P.b.v = sx(M64_BLUE_START, 25);  P.b.xinc = sx(M64_BLUE_X_INC, 25);  P.b.yinc = sx(M64_BLUE_Y_INC, 25);
@@ -318,7 +330,10 @@ static ARGB SampleLevel(unsigned int level, int64_t s16, int64_t t16, bool bilin
 	unsigned int h_log = (height_log > shrink) ? height_log - shrink : 0;
 	if (h_log > w_log) h_log = w_log;
 	pitch_log = (pitch_log > shrink) ? pitch_log - shrink : 0;
-	if (pitch_log < w_log && level == maxsize) pitch_log = w_log;
+	/* TEX_SIZE is the larger dimension; a narrower texture is stored at its
+	 * TEX_PITCH (a 32x64 map is 665h), so the width is the pitch then. The S/T
+	 * scale stays that of TEX_SIZE (square coordinate space). */
+	const unsigned int wm_log = (pitch_log < w_log) ? pitch_log : w_log;
 
 	const uint32_t base = R(M64_TEX_0_OFF + level) & 0x7FFFFF;
 	const uint32_t pitch = 1u << pitch_log;
@@ -329,7 +344,7 @@ static ARGB SampleLevel(unsigned int level, int64_t s16, int64_t t16, bool bilin
 	const int shv = 16 + TEX_COORD_BITS - (int)w_log - 8;   /* T uses the width scale as well: square coordinate space */
 	int64_t u = (sh >= 0) ? (s16 >> sh) : (s16 << -sh);
 	int64_t v = (shv >= 0) ? (t16 >> shv) : (t16 << -shv);
-	const uint32_t wmask = (1u << w_log) - 1, hmask = (1u << h_log) - 1;
+	const uint32_t wmask = (1u << wm_log) - 1, hmask = (1u << h_log) - 1;
 
 	if (!bilinear) {
 		return FetchTexel(base, pitch, (uint32_t)(u >> 8) & wmask, (uint32_t)(v >> 8) & hmask, fmt);

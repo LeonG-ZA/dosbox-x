@@ -133,6 +133,8 @@ enum {
 	M64_CONTEXT_MASK          = 0xC8,
 	M64_CONTEXT_LOAD_CNTL     = 0xCB,
 	M64_GUI_TRAJ_CNTL         = 0xCC,
+	M64_DST_X_Y               = 0xBA,  /* 3D RAGE II (GT-B) only: DST_Y_X with the halves swapped */
+	M64_DST_WIDTH_HEIGHT      = 0xBB,  /* 3D RAGE II (GT-B) only: DST_HEIGHT_WIDTH swapped, initiator */
 	M64_DP_SET_GUI_ENGINE     = 0xBF,  /* 3D RAGE II (GT-B) only */
 	M64_TEX_PALETTE           = 0xDF,  /* 3D RAGE II (GT-B) only: index 31:24, RGB888 23:0 */
 	M64_GUI_STAT              = 0xCE,

@@ -453,16 +453,24 @@ static uint16_t ApertureMB(void) {
 	return (uint16_t)(base >> 20);
 }
 
+/* Mode tables are 26h bytes, with the PRG-215R3 table A-7 fields (CRTC from 0Eh,
+ * dot clock at 1Ah) and two more bytes at the end. The Rage Pro guide gives 24h;
+ * driver 4.35 was written for 26h: macxw4.drv appends its own tables from 1Eh-byte
+ * templates (size - 8), and ATIHAL64 later rebuilds the list at a 26h stride
+ * without updating the size byte (seg1:742Ch), so with 24h its mode search missed
+ * 400x300 and 512x384 (Assault Rigs' menu, Wipeout). */
+static const unsigned int MODE_TABLE_SIZE = 0x26;
+
 static void BuildQuery(PhysPt buf, bool with_modes, unsigned int &size) {
 	const unsigned int nmodes = with_modes ? (unsigned int)(sizeof(mach64_res) / sizeof(mach64_res[0])) : 0;
-	size = 0x20 + nmodes * 0x24;
+	size = 0x20 + nmodes * MODE_TABLE_SIZE;
 	if (!buf) return;
 	for (unsigned int i = 0; i < size; i++) mem_writeb(buf + i, 0);
 	mem_writew(buf + 0x00, (uint16_t)size);
 	mem_writeb(buf + 0x02, 1);                       /* revision */
 	mem_writeb(buf + 0x03, (uint8_t)nmodes);
 	mem_writew(buf + 0x04, 0x20);                    /* offset to the mode tables */
-	mem_writeb(buf + 0x06, 0x24);                    /* size of a mode table */
+	mem_writeb(buf + 0x06, MODE_TABLE_SIZE);         /* size of a mode table */
 	mem_writeb(buf + 0x07, 1);                       /* VGA enabled */
 	mem_writew(buf + 0x08, AsicID());
 	mem_writeb(buf + 0x0A, 0);                       /* VGA boundary: full access */
@@ -482,7 +490,7 @@ static void BuildQuery(PhysPt buf, bool with_modes, unsigned int &size) {
 	mem_writew(buf + 0x18, (uint16_t)iobase);
 	for (unsigned int m = 0; m < nmodes; m++) {
 		const Mach64_Res &r = mach64_res[m];
-		const PhysPt t = buf + 0x20 + m * 0x24;
+		const PhysPt t = buf + 0x20 + m * MODE_TABLE_SIZE;
 		/* deepest colour that fits in video memory */
 		uint8_t depth = 6;
 		static const unsigned int bytespp[7] = { 0, 1, 1, 2, 2, 3, 4 };
