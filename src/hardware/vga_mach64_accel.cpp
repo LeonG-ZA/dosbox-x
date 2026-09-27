@@ -845,6 +845,61 @@ void Mach64_Accel_Write(unsigned int reg, uint32_t val, uint32_t mask) {
 		return;
 	}
 
+	if (reg == M64_TEX_PALETTE) {
+		/* Rage II CI4/CI8 texture palette, separate from the display DAC. Not in
+		 * RRG-G02700; format from 86Box (ATI Windows 95 HAL uploads). */
+		extern void Mach64_TexPaletteWrite(uint32_t v);
+		Store(reg, val, mask, 0xFFFFFFFFu);
+		if (mach64_rage2 && top) Mach64_TexPaletteWrite(R(M64_TEX_PALETTE));
+		return;
+	}
+	if (reg == M64_DP_SET_GUI_ENGINE) {
+		/* 3D RAGE II shortcut that loads a set of engine defaults in one write. Not in
+		 * RRG-G02700 (3D RAGE I); layout follows 86Box's mach64_recalc_dp_set_engine
+		 * (GPL-2.0-or-later). The GT-B driver writes it before each solid fill/blit. */
+		if (!mach64_rage2 || !top) return;
+		static const unsigned int pitches[16] = { 320, 320, 352, 384, 640, 800, 896, 512, 1024, 1152, 1280, 400, 832, 1600, 448, 2048 };
+		const uint32_t v = mach64.reg[M64_DP_SET_GUI_ENGINE] = val;
+		const uint32_t F = 0xFFFFFFFFu;
+		Store(M64_DST_Y, 0, F, 0x7FFF); Store(M64_DST_X, 0, F, 0x1FFF);
+		Store(M64_DST_HEIGHT, 0, F, 0x7FFF); Store(M64_DST_WIDTH, 0, F, 0xFFFF);
+		Store(M64_SRC_Y, 0, F, 0x7FFF); Store(M64_SRC_X, 0, F, 0x1FFF);
+		Store(M64_SRC_Y_START, 0, F, 0x7FFF); Store(M64_SRC_X_START, 0, F, 0x1FFF);
+		Store(M64_SC_TOP, 0, F, 0x7FFF); Store(M64_SC_BOTTOM, 0x3FFF, F, 0x7FFF);
+		Store(M64_SC_LEFT, 0, F, 0x1FFF); Store(M64_SC_RIGHT, 0x0FFF, F, 0x1FFF);   /* 86Box: 1FFFh, but the scissors are signed here */
+		Store(M64_DP_WRITE_MSK, F, F, F);
+		Store(M64_CLR_CMP_CLR, 0, F, F);
+		Store(M64_SRC_CNTL, R(M64_SRC_CNTL) & ~((3u << 13) | (1u << 5) | (1u << 12)), F, 0x0000609F);
+		Store(M64_DST_CNTL, R(M64_DST_CNTL) & ~(7u << 13), F, 0x0002FFFF);
+		uint32_t pw = R(M64_DP_PIX_WIDTH) & (1u << 13);
+		pw |= (v >> 3) & 7;
+		if (v & (1u << 6)) pw |= ((v >> 3) & 7) << 8;
+		Store(M64_DP_PIX_WIDTH, pw, F, F);
+		uint32_t op = (262144u * ((v >> 7) & 3)) & 0xFFFFF;
+		op |= ((pitches[(v >> 10) & 0xF] * ((v & (1u << 14)) ? 2 : 1)) / 8) << 22;
+		Store(M64_DST_OFF_PITCH, op, F, 0xFFCFFFFFu);
+		Store(M64_SRC_OFF_PITCH, (v & (1u << 15)) ? op : 0, F, 0xFFCFFFFFu);
+		static const uint32_t srcsz[4] = { 0x00080008, 0x00200001, 0x00180008, 0 };
+		if (((v >> 16) & 3) != 3) {
+			const uint32_t hw = srcsz[(v >> 16) & 3];
+			Store(M64_SRC_HEIGHT1, hw, F, 0x7FFF); Store(M64_SRC_WIDTH1, hw >> 16, F, 0x1FFF);
+			Store(M64_SRC_HEIGHT2, hw, F, 0x7FFF); Store(M64_SRC_WIDTH2, hw >> 16, F, 0x1FFF);
+		}
+		/* drawing combination: DP_SRC, DP_MIX, GUI_TRAJ_CNTL (0 and 14 unknown) */
+		static const uint32_t combo[16][3] = {
+			{ 0, 0, 0 }, { 0x100, 0x070003, 0x23 }, { 0x200, 0x70007, 3 }, { 0x20100, 0x70007, 3 },
+			{ 0x100, 0x70007, 3 }, { 0x10100, 0x70007, 0x01000003 }, { 0x100, 0x70007, 3 }, { 0x300, 0x70007, 0x30003 },
+			{ 0x300, 0x70007, 0 }, { 0x300, 0x70007, 1 }, { 0x300, 0x70007, 2 }, { 0x300, 0x70007, 3 },
+			{ 0x20100, 0x70003, 0x1004001B }, { 0x20100, 0x70003, 0x0004001B }, { 0, 0, 0 }, { 0x300, 0x70007, 0x0004001B } };
+		const unsigned int c = (v >> 20) & 0xF;
+		if (c != 0 && c != 14) {
+			Store(M64_DP_SRC, combo[c][0], F, 0x00030707);
+			Store(M64_DP_MIX, combo[c][1], F, 0x001F001F);
+			Mach64_Accel_Write(M64_GUI_TRAJ_CNTL, combo[c][2], F);
+		}
+		return;
+	}
+
 	switch (reg) {
 		case M64_DST_Y_X:
 		case M64_DST_Y_X_ALIAS:

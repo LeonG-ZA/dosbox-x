@@ -205,6 +205,10 @@ static ARGB YUV(int y, int u, int v) {
 
 extern bool vga_8bit_dac;
 
+static uint32_t tex_palette[256];   /* Rage II texture palette, RGB888 */
+
+void Mach64_TexPaletteWrite(uint32_t v) { tex_palette[v >> 24] = v & 0xFFFFFFu; }
+
 static ARGB FetchTexel(uint32_t base, uint32_t pitch, uint32_t x, uint32_t y, unsigned int fmt) {
 	const uint8_t *mem = vga.mem.linear;
 	const uint32_t mask = (uint32_t)vga.mem.memmask;
@@ -213,7 +217,17 @@ static ARGB FetchTexel(uint32_t base, uint32_t pitch, uint32_t x, uint32_t y, un
 	switch (fmt) {
 		case M64_PIX_8BPP: {
 			/* pseudocolour through the RAMDAC palette [RRG 4-90] */
-			const uint8_t i = mem[addr & mask];
+			uint8_t i = mem[addr & mask];
+			if (mach64_rage2) {
+				/* Rage II: texture palette; DP_PIX_WIDTH 27/26 pick the high/low nibble
+				 * (CI4) and 23:20 the 16-entry bank (86Box) */
+				const uint32_t pw = R(M64_DP_PIX_WIDTH), sel = pw & (3u << 26);
+				if (sel == (1u << 26)) i = (uint8_t)((((pw >> 20) & 0xF) << 4) | (i & 0xF));
+				else if (sel == (2u << 26)) i = (uint8_t)((((pw >> 20) & 0xF) << 4) | (i >> 4));
+				const uint32_t p = tex_palette[i];
+				c.r = (int)((p >> 16) & 0xFF); c.g = (int)((p >> 8) & 0xFF); c.b = (int)(p & 0xFF);
+				break;
+			}
 			const int sh = vga_8bit_dac ? 0 : 2;
 			c.r = (vga.dac.rgb[i].red << sh) & 0xFF;
 			c.g = (vga.dac.rgb[i].green << sh) & 0xFF;

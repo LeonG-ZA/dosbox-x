@@ -634,7 +634,9 @@ static uint32_t Mach64_ReadRegInner(unsigned int reg) {
 			case M64_FIFO_STAT:
 				return 0;                                   /* empty, no error */
 			case M64_GUI_STAT: {
-				uint32_t v = (32u << 16);                   /* FIFO_CNT: all 32 entries free */
+				/* FIFO_CNT: all entries free. Rage II: 64 (assumed; Time Warriors' ATI3DCIF
+				 * waits for >= 48 free entries before each batch on the GT-B) */
+				uint32_t v = (mach64_rage2 ? 64u : 32u) << 16;
 				if (Mach64_Accel_Busy()) v |= 1u;
 				const int32_t x  = (int32_t)(R(M64_DST_X) << 19) >> 19;
 				const int32_t y  = (int32_t)(R(M64_DST_Y) << 17) >> 17;
@@ -692,9 +694,33 @@ static inline bool Mach64_Trace(void) {
 	return true;
 }
 
+/* TEST HOOK: DOSBOX_X_M64RING=N keeps the last N register accesses and writes them to
+ * DOSBOX_X_M64RINGOUT (default m64ring.log) when DOSBox-X exits */
+struct M64Ring {
+	struct E { uint32_t reg, val, mask, pc, n; bool w; };
+	std::vector<E> buf; size_t pos = 0; bool full = false; bool init = false;
+	bool on() {
+		if (!init) { init = true; const char *e = getenv("DOSBOX_X_M64RING"); if (e && atol(e) > 0) buf.resize((size_t)atol(e)); }
+		return !buf.empty();
+	}
+	void add(bool w, uint32_t reg, uint32_t val, uint32_t mask) { const uint32_t pc = (uint32_t)SegPhys(cs) + (uint32_t)reg_eip;
+		if (pos || full) { E &l = buf[pos ? pos - 1 : buf.size() - 1]; if (l.w == w && l.reg == reg && l.val == val && l.mask == mask && l.pc == pc) { l.n++; return; } }
+		buf[pos] = { reg, val, mask, pc, 1, w }; if (++pos == buf.size()) { pos = 0; full = true; } }
+	~M64Ring() {
+		if (buf.empty()) return;
+		const char *o = getenv("DOSBOX_X_M64RINGOUT"); FILE *f = fopen(o ? o : "m64ring.log", "w"); if (!f) return;
+		const size_t n = full ? buf.size() : pos;
+		for (size_t i = 0; i < n; i++) { const E &e = buf[(full ? pos : 0) + i < buf.size() ? (full ? pos : 0) + i : (full ? pos : 0) + i - buf.size()];
+			if (e.w) fprintf(f, "W %03x = %08x mask %08x pc %08x x%u\n", e.reg, e.val, e.mask, e.pc, e.n); else fprintf(f, "R %03x = %08x pc %08x x%u\n", e.reg, e.val, e.pc, e.n); }
+		fclose(f);
+	}
+};
+static M64Ring m64ring;
+
 uint32_t Mach64_ReadReg(unsigned int reg) {
 	const uint32_t v = Mach64_ReadRegInner(reg);
 	if (Mach64_Trace()) LOG_MSG("M64T R %03x = %08x", reg & 0x1FF, v);
+	if (m64ring.on()) m64ring.add(false, reg & 0x1FF, v, 0);
 	return v;
 }
 
@@ -702,6 +728,7 @@ void Mach64_WriteReg(unsigned int reg, uint32_t val, uint32_t mask) {
 	reg &= 0x1FF;
 	val &= mask;
 	if (Mach64_Trace()) LOG_MSG("M64T W %03x = %08x mask %08x", reg, val, mask);
+	if (m64ring.on()) m64ring.add(true, reg, val, mask);
 
 	if (reg >= 0x40 && reg < 0x100) {
 		Mach64_Accel_Write(reg, val, mask);
