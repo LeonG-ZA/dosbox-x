@@ -40,6 +40,7 @@ struct CovSeg {
 std::vector<CovSeg> segs;
 std::unordered_map<uint64_t, int> by_base;   /* (base, limit) -> segment or -1 */
 bool parsed = false;
+int watch16_done = 0;   /* reset by PE watch hits */
 struct RingEnt { int seg; uint32_t ip; uint64_t n; };
 RingEnt ring[256];
 unsigned int ring_pos = 0;
@@ -122,14 +123,19 @@ int Identify(uint32_t base, uint32_t limit) {
 		const CovSeg &s = segs[i];
 		if (s.pe) continue;
 		if ((size_t)limit + 1 < s.data.size() || (size_t)limit + 1 > s.data.size() + 0x1000) continue;
-		unsigned int same = 0, total = 0;
-		for (uint32_t o = 0; o < 64 && o < s.data.size(); o++) {
-			uint32_t p;
-			if (!LinToPhys(base + o, p)) return -2;  /* not present yet: try again later */
-			total++;
-			if (phys_readb(p) == s.data[o]) same++;
+		bool ok = false;
+		for (uint32_t w0 : { 0u, 0x200u, 0x800u }) {
+			if (w0 + 64 > s.data.size()) continue;
+			unsigned int same = 0, total = 0;
+			for (uint32_t o = w0; o < w0 + 64; o++) {
+				uint32_t p;
+				if (!LinToPhys(base + o, p)) return -2;  /* not present yet: try again later */
+				total++;
+				if (phys_readb(p) == s.data[o]) same++;
+			}
+			if (total && same * 8 >= total * 7) { ok = true; break; }
 		}
-		if (total && same * 8 >= total * 7) return (int)i;
+		if (ok) return (int)i;
 	}
 	return -1;
 }
@@ -208,14 +214,25 @@ static void Mach64_CovHookPE(void) {
 		if (!parsed) {
 			parsed = true;
 			const char *w = getenv("DOSBOX_X_COVWATCHPE");
-			if (w) { std::string t(w); size_t c = t.find(':'); if (c != std::string::npos) { wfile = t.substr(0, c); std::string r = t.substr(c + 1); size_t p0 = 0; while (p0 < r.size()) { size_t q = r.find(',', p0); if (q == std::string::npos) q = r.size(); wr.push_back((uint32_t)strtoul(r.substr(p0, q - p0).c_str(), NULL, 16)); p0 = q + 1; } } }
+			if (w) { std::string t(w); size_t c = t.rfind(':'); if (c != std::string::npos) { wfile = t.substr(0, c); std::string r = t.substr(c + 1); size_t p0 = 0; while (p0 < r.size()) { size_t q = r.find(',', p0); if (q == std::string::npos) q = r.size(); wr.push_back((uint32_t)strtoul(r.substr(p0, q - p0).c_str(), NULL, 16)); p0 = q + 1; } } }
+			LOG_MSG("COV: WATCHPE armed file=%s count=%u", wfile.c_str(), (unsigned)wr.size());
 		}
-		if (!wr.empty() && segs[idx].file == wfile) for (uint32_t x : wr) if (x == rva && cnt[x]++ < 8) {
+		if (!wr.empty() && wfile.size() >= segs[idx].file.size() && wfile.compare(wfile.size() - segs[idx].file.size(), std::string::npos, segs[idx].file) == 0) for (uint32_t x : wr) if (x == rva && cnt[x]++ < 8) {
+			watch16_done = 0;
 			const uint32_t sp = (uint32_t)SegPhys(ss) + reg_esp; uint32_t st[8];
 			for (int k = 0; k < 8; k++) { st[k] = 0; for (int b = 0; b < 4; b++) { uint32_t ph; if (LinToPhys(sp + (uint32_t)k * 4 + (uint32_t)b, ph)) st[k] |= (uint32_t)phys_readb(ph) << (8 * b); } }
 			LOG_MSG("COV WATCHPE %s+%x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x stack %08x %08x %08x %08x %08x %08x %08x %08x",
 				wfile.c_str(), (unsigned)rva, (unsigned)reg_eax, (unsigned)reg_ebx, (unsigned)reg_ecx, (unsigned)reg_edx, (unsigned)reg_esi, (unsigned)reg_edi,
 				st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7]);
+			{   /* DOSBOX_X_COVPEEK="addr:off" also logs [[addr]+off] (e.g. MACXDD32's frame buffer base) */
+				const char *pk = getenv("DOSBOX_X_COVPEEK");
+				if (pk) {
+					const uint32_t a = (uint32_t)strtoul(pk, NULL, 16); const char *c = strchr(pk, ':'); const uint32_t o = c ? (uint32_t)strtoul(c + 1, NULL, 16) : 0;
+					auto rd = [](uint32_t l, uint32_t &v) { v = 0; for (int b = 0; b < 4; b++) { uint32_t ph; if (!LinToPhys(l + (uint32_t)b, ph)) return false; v |= (uint32_t)phys_readb(ph) << (8 * b); } return true; };
+					uint32_t p1 = 0, p2 = 0; const bool ok = rd(a, p1) && rd(p1 + o, p2);
+					LOG_MSG("COV WATCHPE   peek [%08x]=%08x [+%x]=%08x%s", (unsigned)a, (unsigned)p1, (unsigned)o, (unsigned)p2, ok ? "" : " (unmapped)");
+				}
+			}
 			for (int k = 1; k <= 3; k++) {
 				char str[160]; int n = 0;
 				for (; n < 150; n++) { uint32_t ph; if (!LinToPhys(st[k] + (uint32_t)n, ph)) break; const uint8_t c = phys_readb(ph); if (!c) break; str[n] = (c >= 32 && c < 127) ? (char)c : '.'; }
@@ -249,10 +266,27 @@ void Mach64_CovHook(void) {
 	const uint32_t ip = reg_eip & 0xFFFF;
 	if (ip < segs[idx].hit.size()) segs[idx].hit[ip] = 1;
 	{   /* one-shot register dump at DOSBOX_X_COVWATCH="segnum:ip" (hex ip) */
-		static int wseg = -2; static unsigned int wip = 0; static bool done = false;
-		if (wseg == -2) { const char *w = getenv("DOSBOX_X_COVWATCH"); wseg = -1; if (w) { unsigned int a, b; if (sscanf(w, "%u:%x", &a, &b) == 2) { wseg = (int)a; wip = b; } } }
-		if (!done && (int)segs[idx].segnum == wseg && ip == wip) {
-			done = true;
+		static bool wparsed = false; static std::vector<std::pair<int, unsigned int>> wl; int &done = watch16_done;
+		if (!wparsed) { wparsed = true; const char *w = getenv("DOSBOX_X_COVWATCH"); std::string t = w ? w : ""; size_t p0 = 0;
+			while (p0 < t.size()) { size_t q = t.find(',', p0); if (q == std::string::npos) q = t.size(); std::string it = t.substr(p0, q - p0); int hal = 0; if (!it.empty() && it[0] == 'H') { hal = 1000; it = it.substr(1); }
+				unsigned int a, b; if (sscanf(it.c_str(), "%u:%x", &a, &b) == 2) wl.push_back({ (int)a + hal, b }); p0 = q + 1; } }
+		bool wmatch = false;
+		for (auto &x : wl) {
+			const bool want_hal = x.first >= 1000;
+			if ((x.first % 1000) == (int)segs[idx].segnum && x.second == ip && segs[idx].file.find(want_hal ? "HAL" : "DRV") != std::string::npos) wmatch = true;
+		}
+		if (done < 400 && wmatch) {
+			done++;
+			{
+				char mm[80]; size_t mn = 0;
+				for (int k = 0; k < 24; k++) { uint32_t ph; uint8_t c = 0; if (LinToPhys((uint32_t)SegPhys(es) + (uint16_t)(reg_bx + k), ph)) c = phys_readb(ph); mn += (size_t)snprintf(mm + mn, sizeof(mm) - mn, "%02x", c); }
+				char bpw[80]; size_t bn2 = 0;
+				for (int k = 0; k < 8; k++) { uint16_t w = 0; for (int q = 0; q < 2; q++) { uint32_t ph; if (LinToPhys((uint32_t)SegPhys(ss) + (uint16_t)(reg_bp + 4 + k * 2 + q), ph)) w |= (uint16_t)(phys_readb(ph) << (8 * q)); } bn2 += (size_t)snprintf(bpw + bn2, sizeof(bpw) - bn2, " %04x", w); }
+				char spw[80]; size_t sn2 = 0;
+				for (int k = 0; k < 8; k++) { uint16_t w = 0; for (int q = 0; q < 2; q++) { uint32_t ph; if (LinToPhys((uint32_t)SegPhys(ss) + (uint16_t)(reg_sp + k * 2 + q), ph)) w |= (uint16_t)(phys_readb(ph) << (8 * q)); } sn2 += (size_t)snprintf(spw + sn2, sizeof(spw) - sn2, " %04x", w); }
+				LOG_MSG("COV WATCH   dx=%04x [sp..]:%s", (unsigned)reg_dx, spw);
+				LOG_MSG("COV WATCH %s %u:%04x ax=%04x es:bx=%04x:%04x bytes %s [bp+4..]:%s", segs[idx].file.c_str(), segs[idx].segnum, ip, (unsigned)reg_ax, (unsigned)SegValue(es), (unsigned)reg_bx, mm, bpw);
+			}
 			uint32_t pds = 0; const bool okp = LinToPhys((uint32_t)SegPhys(ds) + 0xF10, pds);
 			LOG_MSG("COV WATCH %s seg %u:%04x ds=%04x base %08x lim %x (ds:F10 -> phys %08x %s) es=%04x base %08x fs=%04x base %08x eax=%08x ebx=%08x esi=%08x",
 				segs[idx].file.c_str(), segs[idx].segnum, ip, (unsigned)SegValue(ds), (unsigned)SegPhys(ds), (unsigned)Segs.limit[ds], (unsigned)pds, okp ? "" : "not present",

@@ -292,6 +292,7 @@ bool                PS1AudioCard;       // Perhaps have PS1 as a machine type...
 SVGACards           svgaCard;
 S3Card              s3Card;
 ATICard             atiCard;
+bool                mach64_rage2 = false;
 HerculesCard        hercCard;
 bool                SDLNetInited;
 int32_t              ticksDone;
@@ -1226,6 +1227,7 @@ void DOSBOX_RealInit() {
     std::string mtype(section->Get_string("machine"));
     hercCard = HERC_GraphicsCard;
     atiCard = ATI_VGAWonder;
+    mach64_rage2 = false;
     svgaCard = SVGA_None;
     s3Card = S3_Generic;
     machine = MCH_VGA;
@@ -1257,6 +1259,7 @@ void DOSBOX_RealInit() {
     else if (mtype == "svga_ati_mach32") { svgaCard = SVGA_ATI; atiCard = ATI_Mach32; }
     else if (mtype == "svga_ati_mach64") { svgaCard = SVGA_ATI; atiCard = ATI_Mach64; }
     else if (mtype == "svga_ati_3drage") { svgaCard = SVGA_ATI; atiCard = ATI_Mach64GT; }
+    else if (mtype == "svga_ati_3drage2") { svgaCard = SVGA_ATI; atiCard = ATI_Mach64GT; mach64_rage2 = true; }
     else if (mtype == "mda")           { machine = MCH_MDA; }
     else if (mtype == "ega")           { machine = MCH_EGA; ega200 = false; }
     else if (mtype == "ega200")        { machine = MCH_EGA; ega200 = true; }
@@ -1569,6 +1572,7 @@ void DOSBOX_SetupConfigSections(void) {
 	"svga_ati_mach32",
 	"svga_ati_mach64",
 	"svga_ati_3drage",
+	"svga_ati_3drage2",
 	"svga_dosbox",
 	"svga_dosbox_vbe2",
 	"fm_towns", // STUB

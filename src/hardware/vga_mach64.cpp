@@ -56,6 +56,8 @@ extern void VGA_SetupHandlers(void);
 extern void VGA_DetermineMode_StandardVGA(void);
 
 static const uint32_t M64_CHIP_ID_GT_A2 = 0x40004754;  /* ASIC ID 40h (NEC GT-A2), type 'GT' [RRG 4-17] */
+static const uint32_t M64_CHIP_ID_GT_B  = 0x9A004754;  /* rev 9Ah (3D RAGE II, GT-B2U1); BIOS ASIC ID 479Ah, listed by macxw4.drv 4.35 as 3D-capable */
+static uint32_t Mach64_ChipID(void) { return mach64_rage2 ? M64_CHIP_ID_GT_B : M64_CHIP_ID_GT_A2; }
 static const double   M64_XTAL = 14318180.0;           /* XTALIN, PLL reference [RRG B-5] */
 
 bool Mach64_Present(void) {
@@ -621,7 +623,7 @@ static uint32_t Mach64_ReadRegInner(unsigned int reg) {
 		case M64_DAC_CNTL:
 			return (mach64.reg[reg] & 0xBF00E10C) | (1u << 16); /* DAC_TYPE 1: internal 24-bit [RRG 4-40] */
 		case M64_CONFIG_CHIP_ID:
-			return M64_CHIP_ID_GT_A2;
+			return Mach64_ChipID();
 		case M64_CRC_SIG:
 			return 0;
 		default:
@@ -1220,7 +1222,7 @@ uint8_t Mach64_PCI_ConfigRead_Inner(uint8_t regnum) {
 		case 0x05: return 0;
 		case 0x06: return 0x80;                     /* fast back-to-back capable */
 		case 0x07: return 0x02;                     /* DEVSEL medium */
-		case 0x08: return (uint8_t)(M64_CHIP_ID_GT_A2 >> 24);   /* ASIC ID */
+		case 0x08: return (uint8_t)(Mach64_ChipID() >> 24);   /* ASIC ID */
 		case 0x09: return 0x00;
 		case 0x0A: return (R(M64_CONFIG_CNTL) & (1u << 19)) ? 0x80 : 0x00;
 		case 0x0B: return 0x03;                     /* display controller */

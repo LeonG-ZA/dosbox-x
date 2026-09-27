@@ -11671,7 +11671,7 @@ startfunction:
                             case ATI_Mach8:            card = "ATI Mach8"; break;
                             case ATI_Mach32:           card = "ATI Mach32"; break;
                             case ATI_Mach64:           card = "ATI Mach64"; break;
-                            case ATI_Mach64GT:         card = "ATI 3D RAGE (Mach64 GT)"; break;
+                            case ATI_Mach64GT:         card = mach64_rage2 ? "ATI 3D RAGE II (Mach64 GT-B)" : "ATI 3D RAGE (Mach64 GT)"; break;
                         }
                         break;
                     case SVGA_DOSBoxIG:

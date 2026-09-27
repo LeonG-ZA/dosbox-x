@@ -192,6 +192,7 @@ typedef Bitu				(LoopHandler)(void);
 extern Config*				control;
 extern SVGACards			svgaCard;
 extern ATICard				atiCard;
+extern bool				mach64_rage2;   // machine=svga_ati_3drage2: 3D RAGE II (mach64 GT-B)
 extern S3Card				s3Card;
 extern HerculesCard			hercCard;
 extern MachineType			machine;

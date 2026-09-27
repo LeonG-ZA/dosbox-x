@@ -436,7 +436,7 @@ static VGAModes ModeTypeOfDepth(unsigned int cl) {
 static uint16_t AsicID(void) {
 	/* 4700h = GT-A2 [PRG-215R3 table A-6]; ATI's driver (macxw4.drv 4.35) only
 	 * reports 3D (ATI3DCIF) for the IDs in that table */
-	return 0x4700;
+	return mach64_rage2 ? 0x479A : 0x4700;   /* 479Ah = GT-B (3D RAGE II) */
 }
 
 static uint8_t MemSizeCode(void) {
@@ -472,11 +472,12 @@ static void BuildQuery(PhysPt buf, bool with_modes, unsigned int &size) {
 	mem_writeb(buf + 0x0E, 7);                       /* PCI */
 	mem_writeb(buf + 0x0F, 0);
 	mem_writew(buf + 0x10, ApertureMB());
-	mem_writeb(buf + 0x12, 0);
-	mem_writeb(buf + 0x13, 0x42);                    /* 8M aperture, predefined (see AL=6) */
-	mem_writeb(buf + 0x14, 0x80 | 0x20 | 0x04 | 0x02 | 0x01); /* 32bpp xRGB, RGB 24bpp, 555, 565 */
-	mem_writeb(buf + 0x15, 0x60);                    /* gamma correction, 256 greyscale */
-	mem_writeb(buf + 0x16, (mach64.pci_cfg40 & 4) ? 1 : 0); /* I/O address type (AL=12h) */
+	/* 12h-15h per PRG-215R3 table A-6; macxw4.drv only records the linear frame
+	 * buffer base (which MACXDD32 subtracts from surface addresses) when 12h[1:0] != 0 */
+	mem_writeb(buf + 0x12, 0x42);                    /* 8M aperture, predefined (see AL=6) */
+	mem_writeb(buf + 0x13, 0x80 | 0x20 | 0x04 | 0x02 | 0x01); /* 32bpp xRGB, RGB 24bpp, 555, 565 */
+	mem_writeb(buf + 0x14, 0x60);                    /* gamma correction, 256 greyscale */
+	mem_writeb(buf + 0x15, (mach64.pci_cfg40 & 4) ? 1 : 0); /* I/O address type (AL=12h) */
 	uint32_t iobase = (mach64.pci_cfg40 & 4) ? (mach64.pci_io_base & 0xFF00) : 0x2EC;
 	mem_writew(buf + 0x18, (uint16_t)iobase);
 	for (unsigned int m = 0; m < nmodes; m++) {
