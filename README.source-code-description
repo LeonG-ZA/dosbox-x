@@ -232,6 +232,9 @@ src/hardware/sblaster.cpp   Sound Blaster emulation, overall. The same codebase
 
 src/hardware/pci_bus.cpp    PCI bus emulation and framework.
 
+src/hardware/pvr_pcx.cpp    PowerVR Series 1 (PCX1/PCX2) PCI 3D accelerator for PowerSGL
+                            games: tile based ISP/TSP software renderer
+
 src/hardware/vga.cpp        VGA emulation, modeset, resize event, lookup tables,
                             config parsing.
 

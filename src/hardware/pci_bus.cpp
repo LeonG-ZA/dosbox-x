@@ -403,7 +403,7 @@ bool UnregisterPCIDevice(PCI_Device* device) {
 }
 
 // register PCI device to bus and setup data
-Bits RegisterPCIDevice(PCI_Device* device, Bits bus=-1, Bits slot=-1) {
+Bits RegisterPCIDevice(PCI_Device* device, Bits bus, Bits slot) {
 	if (device == NULL) return -1;
 	if (bus >= PCI_MAX_PCIBUSSES) return -1;
 	if (slot >= PCI_MAX_PCIDEVICES) return -1;

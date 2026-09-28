@@ -3520,6 +3520,24 @@ void DOSBOX_SetupConfigSections(void) {
 	Pbool->Set_help("Show 3dfx splash screen for Glide emulation (Windows; requires 3dfxSpl2.dll).");
     Pbool->SetBasic(true);
 
+    secprop=control->AddSection_prop("powervr",&Null_Init,false); //PowerVR Series 1
+
+    const char* powervr_settings[] = { "false", "pcx1", "pcx2", nullptr };
+    Pstring = secprop->Add_string("powervr_card",Property::Changeable::OnlyAtStart,"false");
+    Pstring->Set_values(powervr_settings);
+    Pstring->Set_help("Enable emulation of a PowerVR Series 1 (NEC/VideoLogic) PCI 3D accelerator, as used by PowerSGL games.\n"
+                      "  pcx1: PCX1 (Apocalypse 3D and other 1996 boards).\n"
+                      "  pcx2: PCX2 (Apocalypse 3Dx, Matrox m3D), adds bilinear filtering and floating point parameters.\n"
+                      "The card renders into the linear frame buffer of the VGA card, so a VESA 2.0 SVGA machine type (e.g. svga_s3) is needed.");
+    Pstring->SetBasic(true);
+
+    Pint = secprop->Add_int("powervr_irq",Property::Changeable::OnlyAtStart,11);
+    Pint->SetMinMax(0,15);
+    Pint->Set_help("IRQ used by the PowerVR card for its end-of-render interrupt. Set to 0 for no interrupt (the driver then polls).");
+
+    Pbool = secprop->Add_bool("powervr_debug",Property::Changeable::OnlyAtStart,false);
+    Pbool->Set_help("Log the PowerVR display list registers of every render (for troubleshooting).");
+
     secprop=control->AddSection_prop("mixer",&Null_Init);
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);
     Pbool->Set_help("Enable silent mode, sound is still emulated though.");

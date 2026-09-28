@@ -60,6 +60,8 @@ Next version:
   - Configuration tool: Fixed a crash when selecting the Devices section.
     (cimarronm)
   - Added 3D Acceleration for S3 ViRGE (LeonG-ZA)
+  - Added PowerVR Series 1 (PCX1/PCX2) 3D accelerator emulation for PowerSGL
+    games, [powervr] section (LeonG-ZA)
   - Increased PAS/OPL volume to match DBX gain (cyberfox1)
   - FPU: Refactored the implementation and fixed x87 status-word
     condition-code reporting and tag words saved with FPU state. (cimarronm)
