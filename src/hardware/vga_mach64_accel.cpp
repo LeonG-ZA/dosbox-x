@@ -604,11 +604,19 @@ static void TrapezoidRun(void) {
 	if (use3d) Mach64_3D_TrapBegin();
 
 	for (int32_t l = 0; l < lines; l++) {
+		/* ASSUMPTION: a vertical right edge (INC 0) leaves out its x. Its error
+		 * (DEC/2 from ATI3DCIF, whichever X direction is set) puts the edge half
+		 * a pixel left of x, so x's centre is outside; including it drew the next
+		 * glyph's or tile's first column (Wipeout and Assault Rigs text, the
+		 * Assault Rigs logo). Sloped edges keep the right x: leaving it out
+		 * cracked the meshes. The next quad's left edge starts at this x. */
 		const int32_t lo = fill_lr ? lead_x : trail_x;
-		const int32_t hi = fill_lr ? trail_x : lead_x;
+		int32_t hi = fill_lr ? trail_x : lead_x;
+		static int oldedge = -1; if (oldedge < 0) oldedge = getenv("DOSBOX_X_M64OLDEDGE") ? 1 : 0;   /* TEST HOOK */
+		if (rtedge_dis || (!oldedge && (fill_lr ? trail_inc : lead_inc) == 0)) hi--;
 		if (lo <= hi && y >= A.sc_top && y <= A.sc_bottom && y >= 0) {
 			const int32_t dl = lo < xmin ? xmin : lo;
-			int32_t dh = rtedge_dis ? hi : hi + 1;
+			int32_t dh = hi + 1;
 			if (dh > xmax + 1) dh = xmax + 1;
 			if (dl < dh) {
 				/* attributes are defined relative to the leading edge, stepping in DST_X_DIR */

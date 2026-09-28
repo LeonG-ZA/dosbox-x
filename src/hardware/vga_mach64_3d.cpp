@@ -75,21 +75,34 @@ static struct {
 
 static inline int64_t sx(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
 
+static uint32_t Mach64_TexPaletteHash(void);
+/* TEST HOOK: DOSBOX_X_M64BLACK=1 logs textured trapezoids that sample almost only black */
+static unsigned int dbg_n = 0, dbg_black = 0, dbg_logged = 0; static char dbg_regs[900];
+static int64_t dbg_s0, dbg_t0, dbg_s1, dbg_t1;
+static uint32_t dbg_fb_base, dbg_fb_pitch, dbg_fb_addr, dbg_fb_raw, dbg_fb_idx, dbg_fb_pal, dbg_fb_x, dbg_fb_y, dbg_fb_fmt; static bool dbg_fb_have; static int dbg_ic[4], dbg_tx[3]; static uint32_t dbg_l_base, dbg_l_pitch, dbg_l_addr, dbg_l_raw, dbg_l_idx, dbg_l_pal, dbg_l_x, dbg_l_y;
 void Mach64_3D_TrapBegin(void) {
+	{
+		dbg_n = dbg_black = 0; dbg_fb_have = false; size_t o = 0;
+		static const unsigned int regs[] = { 0x7F, 0xB4, 0xC0, 0xC1, 0xC2, 0x43, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4E, 0x4F, 0x50, 0x46,
+			0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0x74, 0x75, 0x76, 0x77, 0x78 };
+		for (unsigned int r : regs) o += (size_t)snprintf(dbg_regs + o, sizeof(dbg_regs) - o, " %02x=%08x", r, (unsigned)R(r));
+	}
 	{   /* TEST HOOK: DOSBOX_X_M64STATE=1 logs each new 3D state combination once */
 		static int on = -1; if (on < 0) on = getenv("DOSBOX_X_M64STATE") ? 1 : 0;
 		if (on) {
 			static std::set<std::string> seen; char k[200];
-			snprintf(k, sizeof(k), "3dcntl=%08x pixw=%08x clrcmp_cntl=%08x clr=%08x msk=%08x texsz=%08x zcntl=%08x alpha_start=%08x dstcntl=%08x tex6=%08x",
+			snprintf(k, sizeof(k), "3dcntl=%08x pixw=%08x clrcmp_cntl=%08x clr=%08x msk=%08x texsz=%08x zcntl=%08x alpha_start=%08x tex6=%08x tex8=%08x pal=%08x",
 				(unsigned)R(M64_SCALE_3D_CNTL), (unsigned)R(M64_DP_PIX_WIDTH), (unsigned)R(M64_CLR_CMP_CNTL), (unsigned)R(M64_CLR_CMP_CLR),
-				(unsigned)R(M64_CLR_CMP_MSK), (unsigned)R(M64_TEX_SIZE_PITCH), (unsigned)R(M64_Z_CNTL), (unsigned)R(M64_ALPHA_START), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_TEX_0_OFF + 6));
-			if (seen.size() < 400 && seen.insert(k).second) LOG_MSG("M64STATE %s", k);
+				(unsigned)R(M64_CLR_CMP_MSK), (unsigned)R(M64_TEX_SIZE_PITCH), (unsigned)R(M64_Z_CNTL), (unsigned)R(M64_ALPHA_START), (unsigned)R(M64_TEX_0_OFF + 6), (unsigned)R(M64_TEX_0_OFF + 8), Mach64_TexPaletteHash());
+			if (seen.size() < 4000 && seen.insert(k).second) LOG_MSG("M64STATE %s", k);
 		}
 	}
-	P.r.v = sx(M64_RED_START, 25);   P.r.xinc = sx(M64_RED_X_INC, 25);   P.r.yinc = sx(M64_RED_Y_INC, 25);
-	P.g.v = sx(M64_GREEN_START, 25); P.g.xinc = sx(M64_GREEN_X_INC, 25); P.g.yinc = sx(M64_GREEN_Y_INC, 25);
-	P.b.v = sx(M64_BLUE_START, 25);  P.b.xinc = sx(M64_BLUE_X_INC, 25);  P.b.yinc = sx(M64_BLUE_Y_INC, 25);
-	P.a.v = sx(M64_ALPHA_START, 25); P.a.xinc = sx(M64_ALPHA_X_INC, 25); P.a.yinc = sx(M64_ALPHA_Y_INC, 25);
+	/* ASSUMPTION: the colour starts hold values above 1.0 (Time Warriors writes
+	 * 01034555h for overbright light); read as 25-bit signed they turned black */
+	P.r.v = sx(M64_RED_START, 26);   P.r.xinc = sx(M64_RED_X_INC, 25);   P.r.yinc = sx(M64_RED_Y_INC, 25);
+	P.g.v = sx(M64_GREEN_START, 26); P.g.xinc = sx(M64_GREEN_X_INC, 25); P.g.yinc = sx(M64_GREEN_Y_INC, 25);
+	P.b.v = sx(M64_BLUE_START, 26);  P.b.xinc = sx(M64_BLUE_X_INC, 25);  P.b.yinc = sx(M64_BLUE_Y_INC, 25);
+	P.a.v = sx(M64_ALPHA_START, 26); P.a.xinc = sx(M64_ALPHA_X_INC, 25); P.a.yinc = sx(M64_ALPHA_Y_INC, 25);
 	P.z.v = sx(M64_Z_START, 29);     P.z.xinc = sx(M64_Z_X_INC, 29);     P.z.yinc = sx(M64_Z_Y_INC, 29);
 
 	P.s.v   = sx(M64_S_START, 26);
@@ -109,13 +122,23 @@ void Mach64_3D_TrapBegin(void) {
 /* The trajectory registers are live: store where the next trapezoid of the
  * same triangle continues. */
 void Mach64_3D_TrapEnd(void) {
+	{
+		static int on = -1; if (on < 0) on = getenv("DOSBOX_X_M64BLACK") ? 1 : 0;
+		if (on && dbg_logged < 60 && dbg_n >= 40 && dbg_black * 10 >= dbg_n * 9) {
+			dbg_logged++;
+			uint32_t ck = 2166136261u; for (uint32_t k = 0; k < 128u * 64u; k++) ck = (ck ^ vga.mem.linear[(dbg_fb_base + k) & (uint32_t)vga.mem.memmask]) * 16777619u;
+			LOG_MSG("M64BLACK n=%u black=%u s0=%lld t0=%lld s1=%lld t1=%lld fetch=%d base=%08x pitch=%u x=%u y=%u addr=%08x raw=%02x idx=%02x pal=%06x palhash=%08x texck=%08x ic=%d,%d,%d,%d tx=%d,%d,%d scr=%u,%u regs%s", dbg_n, dbg_black,
+				(long long)dbg_s0, (long long)dbg_t0, (long long)dbg_s1, (long long)dbg_t1,
+				dbg_fb_have ? 1 : 0, dbg_fb_base, dbg_fb_pitch, dbg_fb_x, dbg_fb_y, dbg_fb_addr, dbg_fb_raw, dbg_fb_idx, dbg_fb_pal, Mach64_TexPaletteHash(), ck, dbg_ic[0], dbg_ic[1], dbg_ic[2], dbg_ic[3], dbg_tx[0], dbg_tx[1], dbg_tx[2], dbg_fb_fmt & 0xFFFF, dbg_fb_fmt >> 16, dbg_regs);
+		}
+	}
 	auto put = [](unsigned int reg, int64_t v, uint32_t fieldmask) {
 		mach64.reg[reg] = (uint32_t)v & fieldmask;
 	};
-	put(M64_RED_START, P.r.v, 0x01FFFFFF);
-	put(M64_GREEN_START, P.g.v, 0x01FFFFFF);
-	put(M64_BLUE_START, P.b.v, 0x01FFFFFF);
-	put(M64_ALPHA_START, P.a.v, 0x01FFFFFF);
+	put(M64_RED_START, P.r.v, 0x03FFFFFF);
+	put(M64_GREEN_START, P.g.v, 0x03FFFFFF);
+	put(M64_BLUE_START, P.b.v, 0x03FFFFFF);
+	put(M64_ALPHA_START, P.a.v, 0x03FFFFFF);
 	put(M64_Z_START, P.z.v, 0x1FFFFFFF);
 	put(M64_S_START, P.s.v, 0x03FFFFFF);
 	put(M64_S_XINC_START, P.s.dx, 0x0FFFFFFF);
@@ -220,6 +243,7 @@ extern bool vga_8bit_dac;
 static uint32_t tex_palette[256];   /* Rage II texture palette, RGB888 */
 
 void Mach64_TexPaletteWrite(uint32_t v) { tex_palette[v >> 24] = v & 0xFFFFFFu; }
+static uint32_t Mach64_TexPaletteHash(void) { uint32_t h = 2166136261u; for (unsigned int i = 0; i < 256; i++) h = (h ^ tex_palette[i]) * 16777619u; return h; }   /* TEST HOOK */
 
 static ARGB FetchTexel(uint32_t base, uint32_t pitch, uint32_t x, uint32_t y, unsigned int fmt) {
 	const uint8_t *mem = vga.mem.linear;
@@ -230,6 +254,7 @@ static ARGB FetchTexel(uint32_t base, uint32_t pitch, uint32_t x, uint32_t y, un
 		case M64_PIX_8BPP: {
 			/* pseudocolour through the RAMDAC palette [RRG 4-90] */
 			uint8_t i = mem[addr & mask];
+			const uint8_t dbg_raw = i;
 			if (mach64_rage2) {
 				/* Rage II: texture palette; DP_PIX_WIDTH 27/26 pick the high/low nibble
 				 * (CI4) and 23:20 the 16-entry bank (86Box) */
@@ -237,6 +262,7 @@ static ARGB FetchTexel(uint32_t base, uint32_t pitch, uint32_t x, uint32_t y, un
 				if (sel == (1u << 26)) i = (uint8_t)((((pw >> 20) & 0xF) << 4) | (i & 0xF));
 				else if (sel == (2u << 26)) i = (uint8_t)((((pw >> 20) & 0xF) << 4) | (i >> 4));
 				const uint32_t p = tex_palette[i];
+				dbg_l_base = base; dbg_l_pitch = pitch; dbg_l_addr = addr; dbg_l_raw = dbg_raw; dbg_l_idx = i; dbg_l_pal = p; dbg_l_x = x; dbg_l_y = y;
 				c.r = (int)((p >> 16) & 0xFF); c.g = (int)((p >> 8) & 0xFF); c.b = (int)(p & 0xFF);
 				break;
 			}
@@ -333,6 +359,8 @@ static ARGB SampleLevel(unsigned int level, int64_t s16, int64_t t16, bool bilin
 	/* TEX_SIZE is the larger dimension; a narrower texture is stored at its
 	 * TEX_PITCH (a 32x64 map is 665h), so the width is the pitch then. The S/T
 	 * scale stays that of TEX_SIZE (square coordinate space). */
+	static int oldnarrow = -1; if (oldnarrow < 0) oldnarrow = getenv("DOSBOX_X_M64OLDNARROW") ? 1 : 0;   /* TEST HOOK */
+	if (oldnarrow && pitch_log < w_log && level == maxsize) pitch_log = w_log;
 	const unsigned int wm_log = (pitch_log < w_log) ? pitch_log : w_log;
 
 	const uint32_t base = R(M64_TEX_0_OFF + level) & 0x7FFFFF;
@@ -358,7 +386,14 @@ static ARGB SampleLevel(unsigned int level, int64_t s16, int64_t t16, bool bilin
 	return Lerp(Lerp(c00, c10, fu), Lerp(c01, c11, fu), fv);
 }
 
+static ARGB SampleTexture_(void);
 static ARGB SampleTexture(void) {
+	const ARGB t = SampleTexture_();
+	if (dbg_n == 0) { dbg_s0 = P.ss; dbg_t0 = P.st; }
+	dbg_s1 = P.ss; dbg_t1 = P.st;
+	return t;
+}
+static ARGB SampleTexture_(void) {
 	const uint32_t c3 = R(M64_SCALE_3D_CNTL);
 	const uint32_t tsp = R(M64_TEX_SIZE_PITCH);
 	const unsigned int maxsize = (tsp >> 4) & 0xF;
@@ -541,9 +576,12 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 			if ((ccc & 7) == 1 || ((ccc & 7) == 5 && eq) || ((ccc & 7) == 4 && !eq)) return false;
 		}
 
+		dbg_tx[0] = t.r; dbg_tx[1] = t.g; dbg_tx[2] = t.b;
+		if (false) { dbg_fb_have = true; dbg_fb_base = dbg_l_base; dbg_fb_pitch = dbg_l_pitch; dbg_fb_addr = dbg_l_addr; dbg_fb_raw = dbg_l_raw; dbg_fb_idx = dbg_l_idx; dbg_fb_pal = dbg_l_pal; dbg_fb_x = dbg_l_x; dbg_fb_y = dbg_l_y; }   /* TEST HOOK */
 		ARGB tc = t;
 		if (c3 & (1u << 13)) { tc.r = ic.r; tc.g = ic.g; tc.b = ic.b; }   /* COLOR_OVERRIDE */
-		switch ((c3 >> 22) & 3) {
+		static int nolight = -1; if (nolight < 0) nolight = getenv("DOSBOX_X_M64NOLIGHT") ? 1 : 0;   /* TEST HOOK */
+		switch (nolight ? 0u : ((c3 >> 22) & 3)) {
 			case 1:   /* modulate */
 				c.r = (tc.r * (ic.r + 1)) >> 8; c.g = (tc.g * (ic.g + 1)) >> 8; c.b = (tc.b * (ic.b + 1)) >> 8;
 				break;
@@ -585,6 +623,14 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 		c.r = r > 255 ? 255 : r; c.g = g > 255 ? 255 : g; c.b = b > 255 ? 255 : b;
 	}
 
+	{   /* TEST HOOK: count drawn pixels whose output is (nearly) black */
+		dbg_n++;
+		if (c.r < 8 && c.g < 8 && c.b < 8) {
+			dbg_black++;
+			if (!dbg_fb_have) { dbg_fb_have = true; dbg_fb_base = dbg_l_base; dbg_fb_pitch = dbg_l_pitch; dbg_fb_addr = dbg_l_addr; dbg_fb_raw = dbg_l_raw; dbg_fb_idx = dbg_l_idx; dbg_fb_pal = dbg_l_pal; dbg_fb_x = dbg_l_x; dbg_fb_y = dbg_l_y;
+				dbg_ic[0] = ic.r; dbg_ic[1] = ic.g; dbg_ic[2] = ic.b; dbg_ic[3] = ic.a; if (fcn != 2) dbg_tx[0] = dbg_tx[1] = dbg_tx[2] = -1; dbg_fb_fmt = (uint32_t)x | ((uint32_t)y << 16); }
+		}
+	}
 	out = PackDst(c, dfmt, x, y);
 
 	/* Z write: Z_MASK [RRG 4-61] */
