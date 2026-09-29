@@ -1460,8 +1460,8 @@ public:
 			Job &job = jobs[njobs];
 			job.xpos = (int)((hdr >> 15) & 0x1F) * NUM_SABRE_CELLS;
 			job.ypos = (int)((hdr >> 20) & 0x3FF);
-			job.xend = std::min(job.xpos + (int)((hdr & 0x1F) + 1) * NUM_SABRE_CELLS, 1024);
-			job.yend = std::min(job.ypos + (int)((hdr >> 5) & 0x3FF) + 1, 1024);
+			job.xend = (std::min)(job.xpos + (int)((hdr & 0x1F) + 1) * NUM_SABRE_CELLS, 1024);
+			job.yend = (std::min)(job.ypos + (int)((hdr >> 5) & 0x3FF) + 1, 1024);
 			job.tables.clear();
 			job.pixels = job.lit = job.first_tag = 0;
 
