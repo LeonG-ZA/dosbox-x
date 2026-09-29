@@ -816,9 +816,9 @@ public:
 			base.b = (int)((w1 >> 16) & 0xFF);
 			if (lit_shadow) {
 				const RGBi s = ConvertFrom16to24(w1 & 0xFFFF);
-				base.r = std::min(base.r + s.r, 255);
-				base.g = std::min(base.g + s.g, 255);
-				base.b = std::min(base.b + s.b, 255);
+				base.r = (std::min)(base.r + s.r, 255);
+				base.g = (std::min)(base.g + s.g, 255);
+				base.b = (std::min)(base.b + s.b, 255);
 			}
 		}
 
@@ -851,9 +851,9 @@ public:
 				if (frac == 0x100) { hc.r += 4; hc.g += 4; hc.b += 4; }
 				if (light == 0) hold = hc;
 				else {
-					hold.r = std::min(hold.r + hc.r, 255);
-					hold.g = std::min(hold.g + hc.g, 255);
-					hold.b = std::min(hold.b + hc.b, 255);
+					hold.r = (std::min)(hold.r + hc.r, 255);
+					hold.g = (std::min)(hold.g + hc.g, 255);
+					hold.b = (std::min)(hold.b + hc.b, 255);
 				}
 				inc += 2;
 			}
@@ -873,13 +873,13 @@ public:
 			hl.r >>= 3; hl.g >>= 3; hl.b >>= 3;
 			sh.r >>= 3; sh.g >>= 3; sh.b >>= 3;
 			if (lit_shadow) {
-				hl.r = std::min(hl.r + sh.r, 31);
-				hl.g = std::min(hl.g + sh.g, 31);
-				hl.b = std::min(hl.b + sh.b, 31);
+				hl.r = (std::min)(hl.r + sh.r, 31);
+				hl.g = (std::min)(hl.g + sh.g, 31);
+				hl.b = (std::min)(hl.b + sh.b, 31);
 			}
-			col.r = std::min(col.r + (hl.r << 3), 255);
-			col.g = std::min(col.g + (hl.g << 3), 255);
-			col.b = std::min(col.b + (hl.b << 3), 255);
+			col.r = (std::min)(col.r + (hl.r << 3), 255);
+			col.g = (std::min)(col.g + (hl.g << 3), 255);
+			col.b = (std::min)(col.b + (hl.b << 3), 255);
 		}
 
 		if (!(w0 & MASK_DISABLE_FOG)) {
@@ -1330,7 +1330,7 @@ void PVR_OnPowerOn(Section * /*sec*/) {
 
 void PVR_Init() {
 	Section_prop *section = static_cast<Section_prop *>(control->GetSection("powervr"));
-	if (section != NULL && section->Get_string("powervr_card") != "false")
+	if (section != NULL && std::string(section->Get_string("powervr_card")) != "false")
 		pvr_assigned_base = MEM_HardwareAllocate("PowerVR", 8u << 20);
 	AddExitFunction(AddExitFunctionFuncPair(PVR_Destroy), true);
 	AddVMEventFunction(VM_EVENT_POWERON, AddVMEventFunctionFuncPair(PVR_OnPowerOn));
