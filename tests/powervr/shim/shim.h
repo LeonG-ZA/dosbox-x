@@ -104,6 +104,7 @@ public:
 	}
 	virtual ~PCI_Device() {}
 	virtual void config_write(uint8_t, Bitu, uint32_t) {}
+	virtual uint32_t config_read(uint8_t regnum, Bitu) { return config[regnum]; }
 };
 extern bool pcibus_enable;
 Bits RegisterPCIDevice(PCI_Device *device, Bits bus = -1, Bits slot = -1);
