@@ -3535,6 +3535,10 @@ void DOSBOX_SetupConfigSections(void) {
     Pint->SetMinMax(0,15);
     Pint->Set_help("IRQ used by the PowerVR card for its end-of-render interrupt. Set to 0 for no interrupt (the driver then polls).");
 
+    Pint = secprop->Add_int("powervr_threads",Property::Changeable::OnlyAtStart,0);
+    Pint->SetMinMax(0,64);
+    Pint->Set_help("Number of host CPU threads used to render PowerVR frames. 0 (default) uses one per CPU core, up to 8.");
+
     Pbool = secprop->Add_bool("powervr_debug",Property::Changeable::OnlyAtStart,false);
     Pbool->Set_help("Log the PowerVR display list registers of every render (for troubleshooting).");
 

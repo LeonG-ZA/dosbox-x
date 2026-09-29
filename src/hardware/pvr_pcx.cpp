@@ -73,6 +73,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <vector>
+#include <atomic>
+#include <thread>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 #include "dosbox.h"
 #include "logging.h"
@@ -254,11 +259,22 @@ inline int32_t SatInt32(int64_t v) {
 }
 
 /* [SIM3] texas.c ToPfloat, without its loop running off the end for large values */
+/* number of significant bits of v (0 for 0) */
+inline int BitLength(uint32_t v) {
+	if (!v) return 0;
+#if defined(_MSC_VER)
+	unsigned long idx;
+	_BitScanReverse(&idx, v);
+	return (int)idx + 1;
+#else
+	return 32 - __builtin_clz(v);
+#endif
+}
+
 PFloat ToPfloat(int32_t x) {
 	PFloat t;
-	const int64_t ax = x < 0 ? -(int64_t)x : (int64_t)x;
-	t.e = 0;
-	while (t.e < 40 && ((int64_t)1 << t.e) <= ax) t.e++;
+	const uint32_t ax = x < 0 ? (uint32_t)0 - (uint32_t)x : (uint32_t)x;
+	t.e = BitLength(ax);
 	int32_t m;
 	if (t.e <= 31) m = (int32_t)(uint32_t)((uint64_t)(int64_t)x << (31 - t.e));
 	else m = x >> (t.e - 31);
@@ -538,7 +554,7 @@ public:
 		return w;
 	}
 
-	static inline void SurfProcess(CellState &cell, const CellControl &ins, int32_t C, uint32_t index) {
+	static inline void SurfCellAny(CellState &cell, const CellControl &ins, int32_t C, uint32_t index) {
 		if (ins.delayed_clear_u_id) cell.U_id = 0;
 
 		const bool sign_bit = C < 0;
@@ -616,6 +632,129 @@ public:
 			cell.I_depth = C;
 			cell.I_id = index;
 		}
+	}
+	template <int ILOAD, int ULOAD, int TSHAD>
+	static inline void SurfCell(CellState &cell, const CellControl &ins, int32_t C, uint32_t index) {
+		if (ins.delayed_clear_u_id) cell.U_id = 0;
+
+		const bool sign_bit = C < 0;
+		const int32_t mux_depth = ins.mux_sel ? cell.U_depth : C;
+		const bool I_gte_mux = cell.I_depth >= mux_depth;
+		const bool I_lte_mux = cell.I_depth <= mux_depth;
+
+		bool I_RE = false, I_visib = cell.I_visib, I_forward = cell.I_forward;
+		switch (ILOAD) {
+			case load_i:
+				I_RE = true; I_forward = true; I_visib = ins.plane_visib;
+				break;
+			case load_i_further:
+				if ((!ins.plane_perp && I_gte_mux) || (ins.plane_perp && sign_bit)) {
+					I_RE = true; I_forward = true; I_visib = ins.plane_visib;
+				}
+				break;
+			case load_i_closer:
+				if (!I_gte_mux) {
+					I_RE = true; I_forward = false; I_visib = ins.plane_visib;
+				}
+				break;
+			case load_i_invis_forw:
+				if (!cell.I_visib && cell.I_forward) {
+					I_RE = true; I_forward = false; I_visib = ins.plane_visib;
+				}
+				break;
+			default:
+				break;
+		}
+
+		bool U_RE = false, U_ID_RE = false, U_visib = cell.U_visib;
+		switch (ULOAD) {
+			case load_u:
+				U_RE = true; U_ID_RE = true; U_visib = cell.I_visib;
+				break;
+			case load_u_closer:
+				if ((I_gte_mux && cell.I_visib) || !cell.U_visib) {
+					U_RE = true; U_ID_RE = true; U_visib = cell.I_visib;
+				}
+				break;
+			default:
+				break;
+		}
+
+		bool U_shadow = cell.U_shadow, shad_temp = cell.shad_temp;
+		if (U_RE) {
+			U_shadow = false;
+			shad_temp = false; /* [SIM3] leaves shad_temp_intern at its FALSE initial value */
+		}
+		else {
+			switch (TSHAD) {
+				case test_shad_closer:
+					shad_temp = !I_lte_mux;
+					break;
+				case test_shadow_further:
+					U_shadow = cell.U_shadow || (I_lte_mux && cell.shad_temp);
+					break;
+				case test_light_further:
+					U_shadow = !((I_lte_mux && cell.shad_temp) || !cell.U_shadow);
+					break;
+				default:
+					break;
+			}
+		}
+
+		cell.U_visib = U_visib;
+		cell.U_shadow = U_shadow;
+		if (U_RE) cell.U_depth = cell.I_depth;
+		if (U_ID_RE) cell.U_id = cell.I_id;
+		cell.I_visib = I_visib;
+		cell.I_forward = I_forward;
+		cell.shad_temp = shad_temp;
+		if (I_RE) {
+			cell.I_depth = C;
+			cell.I_id = index;
+		}
+	}
+
+	/* one plane against the 32 cells of a span; the command fields are template
+	 * parameters so that the per-cell switches disappear from the inner loop */
+	template <int ILOAD, int ULOAD, int TSHAD>
+	static void SurfSpan(CellState *cells, const CellControl &ins, int64_t c40, int32_t a30, uint32_t index) {
+		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
+			SurfCell<ILOAD, ULOAD, TSHAD>(cells[cl], ins, DepthTop32(c40), index);
+			c40 += a30;
+		}
+	}
+
+	typedef void (*SurfSpanFn)(CellState *, const CellControl &, int64_t, int32_t, uint32_t);
+
+	template <int ILOAD, int ULOAD>
+	static SurfSpanFn PickShad(int s) {
+		switch (s) {
+			case test_shad_closer: return &SurfSpan<ILOAD, ULOAD, test_shad_closer>;
+			case test_shadow_further: return &SurfSpan<ILOAD, ULOAD, test_shadow_further>;
+			case test_light_further: return &SurfSpan<ILOAD, ULOAD, test_light_further>;
+			default: return &SurfSpan<ILOAD, ULOAD, test_shad_nop>;
+		}
+	}
+	template <int ILOAD>
+	static SurfSpanFn PickU(int u, int s) {
+		switch (u) {
+			case load_u: return PickShad<ILOAD, load_u>(s);
+			case load_u_closer: return PickShad<ILOAD, load_u_closer>(s);
+			default: return PickShad<ILOAD, load_u_nop>(s);
+		}
+	}
+	static SurfSpanFn PickSurfSpan(const CellControl &w) {
+		switch (w.i_load) {
+			case load_i: return PickU<load_i>(w.u_load, w.test_shad);
+			case load_i_further: return PickU<load_i_further>(w.u_load, w.test_shad);
+			case load_i_closer: return PickU<load_i_closer>(w.u_load, w.test_shad);
+			case load_i_invis_forw: return PickU<load_i_invis_forw>(w.u_load, w.test_shad);
+			default: return PickU<load_i_nop>(w.u_load, w.test_shad);
+		}
+	}
+
+	static inline void SurfProcess(CellState &cell, const CellControl &ins, int32_t C, uint32_t index) {
+		SurfCellAny(cell, ins, C, index);
 	}
 
 	/* ---- fog ([SIM3] hwsabren.c Fog, table from the FOG_TABLE registers) ---- */
@@ -1022,8 +1161,6 @@ public:
 
 	/* ---- tile traversal ([SIM3] hwsabren.c HWISPRenderer) ---- */
 
-	std::vector<Plane>  planes;
-	std::vector<Object> objects;
 	uint64_t span_plane_budget;
 	uint32_t plane_budget;
 	/* per-render statistics for the diagnostic log */
@@ -1070,11 +1207,42 @@ public:
 		return true;
 	}
 
-	/* Decode the object pointers of the region whose header is at 'pos' into objects/planes.
+	/* The expanded ("wide") cell commands of a region's planes depend only on the plane
+	 * sequence and on the expansion state at the start of a span, so they are computed
+	 * once per region and start state instead of for every span. The sequencing is exactly
+	 * the one the per-span loop of [SIM3] HWISPRenderer goes through. */
+	struct ExpState {
+		int prev; bool sec, first;
+		bool operator==(const ExpState &o) const { return prev == o.prev && sec == o.sec && first == o.first; }
+	};
+	struct WideTable {
+		ExpState start, end;
+		std::vector<CellControl> wide;
+		std::vector<SurfSpanFn> fn;
+	};
+
+	/* One region (tile) of the frame. Regions are decoded, and their expansion tables and
+	 * frame buffer contents prepared, in list order; the spans are then rendered on worker
+	 * threads, and the results written back in list order. */
+	struct Job {
+		int xpos, ypos, xend, yend;        /* clipped to 1024x1024 */
+		uint32_t span_limit;               /* spans to render (work budget) */
+		std::vector<Object> objects;
+		std::vector<Plane> planes;
+		std::vector<WideTable> tables;
+		std::vector<uint8_t> span_table;   /* table index of each span */
+		std::vector<RGBi> fb;              /* the region's frame buffer pixels */
+		std::vector<uint8_t> dirty;
+		uint32_t pixels, lit, first_tag;
+	};
+	std::vector<Job> jobs;
+	size_t njobs = 0;
+
+	/* Decode the object pointers of the region whose header is at 'q' into the job.
 	 * Returns the index of the next region header, or ~0 if this was the last region. */
-	uint32_t DecodeRegion(uint32_t q, bool &error) {
-		objects.clear();
-		planes.clear();
+	uint32_t DecodeRegion(uint32_t q, Job &job, bool &error) {
+		job.objects.clear();
+		job.planes.clear();
 		const uint32_t words_per_plane = (pcx2 && (regs[PCX_IEEEFP] & 1)) ? 4 : 3;
 		for (uint32_t n = 0; n < MAX_OBJECTS_PER_REGION; n++) {
 			q++;
@@ -1085,17 +1253,17 @@ public:
 				return q;
 			}
 			Object o;
-			o.first_plane = (uint32_t)planes.size();
+			o.first_plane = (uint32_t)job.planes.size();
 			o.num_planes = (od >> 19) & 0x3FF;
 			const uint32_t paddr = od & 0x7FFFF;
-			if (planes.size() + o.num_planes > MAX_PLANES_PER_REGION || o.num_planes > plane_budget) { error = true; return ~0u; }
+			if (job.planes.size() + o.num_planes > MAX_PLANES_PER_REGION || o.num_planes > plane_budget) { error = true; return ~0u; }
 			plane_budget -= o.num_planes;
 			for (uint32_t p = 0; p < o.num_planes; p++) {
 				Plane pl;
 				DecodePlane(paddr + p * words_per_plane, pl);
-				planes.push_back(pl);
+				job.planes.push_back(pl);
 			}
-			objects.push_back(o);
+			job.objects.push_back(o);
 
 			if (od & OBJ_VERY_LAST_PTR) return ~0u;
 			uint32_t nq = q + 1;
@@ -1107,63 +1275,123 @@ public:
 		return ~0u;
 	}
 
-	void ShadeSpan(const CellState *cell, int XSpan, int YLine, RGBi *fb, bool *fb_loaded, bool *fb_dirty) {
-		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
-			if (!cell[cl].U_id) continue;
-			const int x = XSpan + cl;
-			if (!fb_loaded[cl]) { fb[cl] = ReadFB(x, YLine); fb_loaded[cl] = true; }
-			Texas(x, YLine, cell[cl].U_id << 1, cell[cl].U_shadow, Fog(cell[cl].U_depth), fb[cl]);
-			fb_dirty[cl] = true;
-			if (!stat_first_tag) stat_first_tag = cell[cl].U_id;
-		}
-	}
-
-	void RenderSpan(int XSpan, int YLine) {
-		CellState cell[NUM_SABRE_CELLS];
-		memset(cell, 0, sizeof(cell));
-		RGBi fb[NUM_SABRE_CELLS];
-		bool fb_loaded[NUM_SABRE_CELLS], fb_dirty[NUM_SABRE_CELLS];
-		memset(fb_loaded, 0, sizeof(fb_loaded));
-		memset(fb_dirty, 0, sizeof(fb_dirty));
+	/* index of the job's table for start state 'st', building it if needed */
+	uint8_t WideTableFor(Job &job, const ExpState &st) {
+		for (size_t i = 0; i < job.tables.size(); i++)
+			if (job.tables[i].start == st) return (uint8_t)i;
+		job.tables.emplace_back();
+		WideTable &t = job.tables.back();
+		t.wide.assign(job.planes.size(), CellControl());
+		t.fn.assign(job.planes.size(), (SurfSpanFn)NULL);
+		prev_intern_out = st.prev; sec_obj = st.sec; first_obj = st.first;
 		bool no_object_yet = true;
-
-		for (size_t oi = 0; oi < objects.size(); oi++) {
-			const Object &o = objects[oi];
+		for (size_t oi = 0; oi < job.objects.size(); oi++) {
+			const Object &o = job.objects[oi];
 			bool translucent = false;
 			for (uint32_t pi = 0; pi < o.num_planes; pi++) {
-				const Plane &pl = planes[o.first_plane + pi];
-				const int instr = pl.instr;
+				const int instr = job.planes[o.first_plane + pi].instr;
 				if (instr == forw_visib_fp || instr == forw_invis_fp || instr == test_shad_forw_fp) {
 					if (no_object_yet) { sec_obj = false; first_obj = true; no_object_yet = false; }
 					else if (first_obj && !sec_obj) { first_obj = false; sec_obj = true; }
 					else sec_obj = false;
 				}
 				if (!translucent) {
-					const CellControl wide = ExpandInstruction(instr, false);
-					/* depth = A*x + B*y + C, in the 40-bit adder of which C is the top 32 bits */
-					int64_t c40 = (int64_t)pl.a30 * XSpan + (int64_t)pl.b30 * YLine + (int64_t)pl.c * 256;
-					for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
-						SurfProcess(cell[cl], wide, SatInt32(c40 / 256), pl.index);
-						c40 += pl.a30;
-					}
+					t.wide[o.first_plane + pi] = ExpandInstruction(instr, false);
+					t.fn[o.first_plane + pi] = PickSurfSpan(t.wide[o.first_plane + pi]);
 				}
 				if (instr == begin_trans) translucent = true;
+			}
+		}
+		t.start = st;
+		t.end.prev = prev_intern_out; t.end.sec = sec_obj; t.end.first = first_obj;
+		return (uint8_t)(job.tables.size() - 1);
+	}
+
+	/* top 32 bits of the 40-bit adder, truncating as the simulator's conversion does */
+	static inline int32_t DepthTop32(int64_t c40) {
+		return SatInt32(c40 >= 0 ? (c40 >> 8) : -((-c40) >> 8));
+	}
+
+	void ShadeSpan(Job &job, const CellState *cell, int XSpan, int YLine, RGBi *fb, uint8_t *dirty) const {
+		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
+			if (!cell[cl].U_id || XSpan + cl >= job.xend) continue;
+			Texas(XSpan + cl, YLine, cell[cl].U_id << 1, cell[cl].U_shadow, Fog(cell[cl].U_depth), fb[cl]);
+			dirty[cl] = 1;
+			if (!job.first_tag) job.first_tag = cell[cl].U_id;
+		}
+	}
+
+	/* Render one span of a job into the job's frame buffer copy. Called on worker threads:
+	 * reads only the job, the registers and texture memory. */
+	void RenderSpan(Job &job, const WideTable &tab, int XSpan, int YLine) const {
+		static const CellControl flush = Wide(load_i_nop, load_u_closer, test_shad_nop, true, false, false, true);
+		CellState cell[NUM_SABRE_CELLS];
+		memset(cell, 0, sizeof(cell));
+		const size_t row = (size_t)(YLine - job.ypos) * (size_t)(job.xend - job.xpos) + (size_t)(XSpan - job.xpos);
+		RGBi *fb = &job.fb[row];
+		uint8_t *dirty = &job.dirty[row];
+
+		for (size_t oi = 0; oi < job.objects.size(); oi++) {
+			const Object &o = job.objects[oi];
+			bool translucent = false;
+			for (uint32_t pi = 0; pi < o.num_planes; pi++) {
+				const Plane &pl = job.planes[o.first_plane + pi];
+				if (!translucent) {
+					const CellControl &wide = tab.wide[o.first_plane + pi];
+					/* depth = A*x + B*y + C, in the 40-bit adder of which C is the top 32 bits */
+					const int64_t c40 = (int64_t)pl.a30 * XSpan + (int64_t)pl.b30 * YLine + (int64_t)pl.c * 256;
+					/* A perpendicular (edge) plane that only loads cells where it is negative
+					 * changes nothing if it is non-negative across the whole span; the depth
+					 * is linear in x, so the two end cells decide. */
+					if (!(wide.i_load == load_i_further && wide.plane_perp && wide.u_load == load_u_nop &&
+						wide.test_shad == test_shad_nop && !wide.delayed_clear_u_id &&
+						DepthTop32(c40) >= 0 && DepthTop32(c40 + (int64_t)pl.a30 * (NUM_SABRE_CELLS - 1)) >= 0))
+						tab.fn[o.first_plane + pi](cell, wide, c40, pl.a30, pl.index);
+				}
+				if (pl.instr == begin_trans) translucent = true;
 			}
 
 			/* a translucent pass start shades what the cells hold so far; the last object of
 			 * the region is followed by a flush down the pipeline and the final shading */
-			if (translucent) ShadeSpan(cell, XSpan, YLine, fb, fb_loaded, fb_dirty);
-			if (oi + 1 == objects.size()) {
-				const CellControl flush = ExpandInstruction(0, true);
+			if (translucent) ShadeSpan(job, cell, XSpan, YLine, fb, dirty);
+			if (oi + 1 == job.objects.size()) {
 				for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) SurfProcess(cell[cl], flush, 0, 0);
-				ShadeSpan(cell, XSpan, YLine, fb, fb_loaded, fb_dirty);
+				ShadeSpan(job, cell, XSpan, YLine, fb, dirty);
 			}
 		}
-
-		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
-			if (fb_dirty[cl] && !XClipped(XSpan + cl)) { WriteFB(XSpan + cl, YLine, fb[cl]); stat_pixels++; if (fb[cl].r | fb[cl].g | fb[cl].b) stat_lit++; }
-		}
 	}
+
+	void RenderJob(Job &job) const {
+		uint32_t span = 0;
+		for (int y = job.ypos; y < job.yend; y++)
+			for (int x = job.xpos; x < job.xend; x += NUM_SABRE_CELLS, span++) {
+				if (span >= job.span_limit) return;
+				RenderSpan(job, job.tables[job.span_table[span]], x, y);
+			}
+	}
+
+	void LoadJobFB(Job &job) const {
+		const int w = job.xend - job.xpos;
+		for (int y = job.ypos; y < job.yend; y++)
+			for (int x = job.xpos; x < job.xend; x++)
+				job.fb[(size_t)(y - job.ypos) * w + (x - job.xpos)] = ReadFB(x, y);
+	}
+
+	void StoreJobFB(Job &job) {
+		const int w = job.xend - job.xpos;
+		for (int y = job.ypos; y < job.yend; y++)
+			for (int x = job.xpos; x < job.xend; x++) {
+				const size_t i = (size_t)(y - job.ypos) * w + (x - job.xpos);
+				if (!job.dirty[i] || XClipped(x)) continue;
+				const RGBi &c = job.fb[i];
+				WriteFB(x, y, c);
+				stat_pixels++;
+				if (c.r | c.g | c.b) stat_lit++;
+			}
+		if (!stat_first_tag) stat_first_tag = job.first_tag;
+	}
+
+	unsigned num_threads = 1;
 
 	/* powervr_debug: save everything one render reads, for offline replay with
 	 * tests/powervr/pvr_replay.cpp. Layout: "PVRDUMP1", u32 pcx2, u32 tlb_shift,
@@ -1213,46 +1441,96 @@ public:
 		LoadFogTable();
 		span_plane_budget = MAX_SPAN_PLANES_PER_RENDER;
 		plane_budget = MAX_PLANES_PER_RENDER;
-		prev_intern_out = prev_none;
-		sec_obj = first_obj = false;
+		ExpState state = { prev_none, false, false };
+		njobs = 0;
+		bool overlap = false;
+		static uint32_t covered[1024]; /* one bit per 32 pixel wide tile column */
+		memset(covered, 0, sizeof(covered));
 
+		/* 1: decode the regions and prepare them, in list order */
 		uint32_t pos = 0;
-		for (uint32_t region = 0; region < MAX_REGIONS_PER_RENDER; region++) {
+		bool done = false;
+		for (uint32_t region = 0; region < MAX_REGIONS_PER_RENDER && !done; region++) {
 			uint32_t hdr = ObjWordStripped(pos);
 			if (!ResolveLinks(pos, hdr) || !(hdr & REG_COMPULSARY_BITS)) {
 				Warn("malformed region list at word/value", pos, hdr);
-				return;
+				break;
 			}
-			const int xsize = (int)((hdr & 0x1F) + 1) * NUM_SABRE_CELLS;
-			const int ysize = (int)((hdr >> 5) & 0x3FF) + 1;
-			const int xpos = (int)((hdr >> 15) & 0x1F) * NUM_SABRE_CELLS;
-			const int ypos = (int)((hdr >> 20) & 0x3FF);
+			if (njobs == jobs.size()) jobs.emplace_back();
+			Job &job = jobs[njobs];
+			job.xpos = (int)((hdr >> 15) & 0x1F) * NUM_SABRE_CELLS;
+			job.ypos = (int)((hdr >> 20) & 0x3FF);
+			job.xend = std::min(job.xpos + (int)((hdr & 0x1F) + 1) * NUM_SABRE_CELLS, 1024);
+			job.yend = std::min(job.ypos + (int)((hdr >> 5) & 0x3FF) + 1, 1024);
+			job.tables.clear();
+			job.pixels = job.lit = job.first_tag = 0;
 
 			bool error = false;
-			const uint32_t next = DecodeRegion(pos, error);
+			const uint32_t next = DecodeRegion(pos, job, error);
 			if (error) {
 				Warn("malformed object list in region at word", pos, 0);
-				return;
+				break;
 			}
 			stat_regions++;
-			stat_objects += (uint32_t)objects.size();
-			stat_planes += (uint32_t)planes.size();
-			if (!objects.empty()) {
-				for (int y = ypos; y < ypos + ysize && y < 1024; y++) {
-					for (int x = xpos; x < xpos + xsize && x < 1024; x += NUM_SABRE_CELLS) {
-						if (span_plane_budget < planes.size() + 1) {
-							Warn("work limit exceeded at region/planes", stat_regions, (uint32_t)planes.size());
-							return;
-						}
-						span_plane_budget -= planes.size() + 1;
-						RenderSpan(x, y);
+			stat_objects += (uint32_t)job.objects.size();
+			stat_planes += (uint32_t)job.planes.size();
+
+			if (!job.objects.empty() && job.xend > job.xpos && job.yend > job.ypos) {
+				const uint32_t spans = (uint32_t)(job.yend - job.ypos) * (uint32_t)((job.xend - job.xpos) / NUM_SABRE_CELLS);
+				job.span_table.resize(spans);
+				job.span_limit = spans;
+				for (uint32_t sp = 0; sp < spans; sp++) {
+					if (span_plane_budget < job.planes.size() + 1) {
+						Warn("work limit exceeded at region/planes", stat_regions, (uint32_t)job.planes.size());
+						job.span_limit = sp;
+						done = true;
+						break;
 					}
+					span_plane_budget -= job.planes.size() + 1;
+					const uint8_t t = WideTableFor(job, state);
+					job.span_table[sp] = t;
+					state = job.tables[t].end;
 				}
+				const size_t npix = (size_t)(job.xend - job.xpos) * (size_t)(job.yend - job.ypos);
+				job.fb.resize(npix);
+				job.dirty.assign(npix, 0);
+				for (int y = job.ypos; y < job.yend; y++)
+					for (int x = job.xpos; x < job.xend; x += NUM_SABRE_CELLS) {
+						const uint32_t bit = 1u << (x / NUM_SABRE_CELLS);
+						if (covered[y] & bit) overlap = true;
+						covered[y] |= bit;
+					}
+				njobs++;
 			}
-			if (next == ~0u) return;
+			if (next == ~0u) break;
 			pos = next;
+			if (region + 1 == MAX_REGIONS_PER_RENDER) Warn("too many regions", stat_regions, 0);
 		}
-		Warn("too many regions", stat_regions, 0);
+
+		/* 2 and 3: render the regions and write them back. Overlapping regions (which the
+		 * driver does not produce) are done one at a time so each sees the one before. */
+		if (overlap || num_threads <= 1 || njobs < 2) {
+			for (size_t i = 0; i < njobs; i++) {
+				LoadJobFB(jobs[i]);
+				RenderJob(jobs[i]);
+				StoreJobFB(jobs[i]);
+			}
+			return;
+		}
+		for (size_t i = 0; i < njobs; i++) LoadJobFB(jobs[i]);
+		std::atomic<size_t> next_job(0);
+		auto worker = [this, &next_job]() {
+			for (;;) {
+				const size_t i = next_job.fetch_add(1);
+				if (i >= njobs) break;
+				RenderJob(jobs[i]);
+			}
+		};
+		std::vector<std::thread> threads;
+		for (unsigned t = 1; t < num_threads; t++) threads.emplace_back(worker);
+		worker();
+		for (std::thread &t : threads) t.join();
+		for (size_t i = 0; i < njobs; i++) StoreJobFB(jobs[i]);
 	}
 };
 
@@ -1431,6 +1709,12 @@ void PVR_OnPowerOn(Section * /*sec*/) {
 	InitTwiddle();
 	const int irq = section->Get_int("powervr_irq");
 	pvr = new PowerVR(card == "pcx2", irq, section->Get_bool("powervr_debug"));
+	int threads = section->Get_int("powervr_threads");
+	if (threads <= 0) {
+		threads = (int)std::thread::hardware_concurrency();
+		if (threads > 8) threads = 8;
+	}
+	pvr->num_threads = threads < 1 ? 1 : (unsigned)threads;
 
 	/* 8MB window: texture memory in the first 4MB, registers at the start of the second */
 	uint32_t base = pvr_assigned_base;
@@ -1446,8 +1730,8 @@ void PVR_OnPowerOn(Section * /*sec*/) {
 	while (slot < 32 && !PCI_IsSlotFree(0, slot)) slot++;
 	RegisterPCIDevice(pvr_pci, 0, slot < 32 ? slot : -1);
 	MapBARs(bar0, bar1);
-	LOG_MSG("PowerVR %s installed: registers at %08x, 4MB texture memory at %08x, IRQ %d",
-		pvr->pcx2 ? "PCX2" : "PCX1", bar0, bar1, irq);
+	LOG_MSG("PowerVR %s installed: registers at %08x, 4MB texture memory at %08x, IRQ %d, %u render threads",
+		pvr->pcx2 ? "PCX2" : "PCX1", bar0, bar1, irq, pvr->num_threads);
 }
 
 } // anonymous namespace

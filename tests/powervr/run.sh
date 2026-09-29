@@ -4,5 +4,5 @@
 set -e
 here=$(dirname "$0")
 out=${1:-.}
-${CXX:-g++} -std=gnu++14 -O2 -Wall -Wextra -I"$here/shim" "$here/pvr_test.cpp" -o "$out/pvr_test" -lm
+${CXX:-g++} -std=gnu++14 -O2 -Wall -Wextra -I"$here/shim" "$here/pvr_test.cpp" -o "$out/pvr_test" -lm -pthread
 "$out/pvr_test" "$out"

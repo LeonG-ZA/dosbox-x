@@ -1,11 +1,12 @@
 /* Replays a frame saved by the PowerVR emulation with powervr_debug = true
  * (pvrdump_NNNN.bin) and writes the result as a PPM image.
  *
- * Build: g++ -std=gnu++14 -O2 -Itests/powervr/shim tests/powervr/pvr_replay.cpp -o pvr_replay
- * Run:   ./pvr_replay pvrdump_0060.bin out.ppm
+ * Build: g++ -std=gnu++14 -O2 -pthread -Itests/powervr/shim tests/powervr/pvr_replay.cpp -o pvr_replay
+ * Run:   ./pvr_replay pvrdump_0060.bin out.ppm [repeat count] [threads]
  */
 
 #include <stdarg.h>
+#include <chrono>
 #include "../../src/hardware/pvr_pcx.cpp"
 
 std::vector<uint8_t> shim_ram(64u << 20);
@@ -58,7 +59,13 @@ int main(int argc, char **argv) {
 	if (!(pcx2 && (regs[PCX_OBJECT_OFFSET] & 1))) pvr->regs[PCX_OBJECT_OFFSET] = OBJ_BASE;
 	pvr->regs[PCX_SOFADDR] = FB_BASE;
 	pvr->regs[PCX_PAGE_CTRL] = 0;
-	pvr->WriteReg(PCX_STARTRENDER, 0);
+	const int runs = argc > 3 ? atoi(argv[3]) : 1;
+	if (argc > 4) pvr->num_threads = (unsigned)atoi(argv[4]);
+	printf("threads: %u\n", pvr->num_threads);
+	const auto t0 = std::chrono::steady_clock::now();
+	for (int r = 0; r < runs; r++) pvr->WriteReg(PCX_STARTRENDER, 0);
+	printf("render time: %.1f ms per frame\n",
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / runs);
 
 	const unsigned bpp = pvr->OutBytesPerPixel();
 	const int W = 640, H = 480;

@@ -169,6 +169,23 @@ The default is therefore **PCX1**, as the brief proposes, with **PCX2** selectab
   `MEM_GetPageHandler()` like a real bus master. With that, Tomb Raider's title screen and
   in-game demo render correctly (checked by replaying frames saved with `powervr_debug`).
 
+## Performance
+
+Measured by replaying Tomb Raider frames (`tests/powervr/pvr_replay.cpp`) on a 4-core machine,
+640x480, ~12-18k planes per frame: about 120 ms per frame originally, 44-63 ms after the
+optimisations below on one thread, 16-22 ms with 4 threads. Every step was checked to give
+byte-identical images.
+
+- The cells' expanded instructions are computed once per region and span start state, not for
+  every span.
+- An edge (perpendicular) plane that is non-negative at both ends of a span is skipped.
+- The per-cell state machine is instantiated per instruction combination, so its switches
+  leave the inner loop.
+- Regions are rendered in parallel (`powervr_threads`, default one per core up to 8) into
+  per-region copies of the frame buffer. Decoding, instruction tables and frame buffer reads and
+  writes stay in list order on the emulation thread; overlapping regions fall back to
+  one-at-a-time.
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with
