@@ -69,6 +69,7 @@
 #include <algorithm>
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <vector>
@@ -994,7 +995,7 @@ public:
 	uint64_t span_plane_budget;
 	uint32_t plane_budget;
 	/* per-render statistics for the diagnostic log */
-	uint32_t stat_regions, stat_objects, stat_planes, stat_pixels, stat_first_tag;
+	uint32_t stat_regions, stat_objects, stat_planes, stat_pixels, stat_lit, stat_first_tag;
 	unsigned warnings = 0;
 
 	void Warn(const char *msg, uint32_t a, uint32_t b) {
@@ -1128,14 +1129,37 @@ public:
 		}
 
 		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
-			if (fb_dirty[cl] && !XClipped(XSpan + cl)) { WriteFB(XSpan + cl, YLine, fb[cl]); stat_pixels++; }
+			if (fb_dirty[cl] && !XClipped(XSpan + cl)) { WriteFB(XSpan + cl, YLine, fb[cl]); stat_pixels++; if (fb[cl].r | fb[cl].g | fb[cl].b) stat_lit++; }
 		}
+	}
+
+	/* powervr_debug: save everything one render reads, for offline replay with
+	 * tests/powervr/pvr_replay.cpp. Layout: "PVRDUMP1", u32 pcx2, u32 tlb_shift,
+	 * regs[0x400], texture memory (4MB), 256 TLB slots of plane memory, 1M words of
+	 * object pointers. All little endian. */
+	void DumpFrame() {
+		char name[64];
+		snprintf(name, sizeof(name), "pvrdump_%04u.bin", renders);
+		FILE *f = fopen(name, "wb");
+		if (!f) { LOG_MSG("PowerVR: could not create %s", name); return; }
+		auto put32 = [f](uint32_t v) { uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; fwrite(b, 1, 4, f); };
+		fwrite("PVRDUMP1", 1, 8, f);
+		put32(pcx2 ? 1 : 0);
+		put32(tlb_shift);
+		for (int i = 0; i < PCX_NUM_REGS; i++) put32(regs[i]);
+		fwrite(tmem, 1, TMEM_SIZE, f);
+		const uint32_t plane_words = (256u << tlb_shift) / 4;
+		for (uint32_t i = 0; i < plane_words; i++) put32(PlaneWord(i));
+		for (uint32_t i = 0; i < (1u << 20); i++) put32(ObjWord(i));
+		fclose(f);
+		LOG_MSG("PowerVR: render #%u saved to %s", renders, name);
 	}
 
 	void Render() {
 		renders++;
 		DetermineTLBPageSize();
-		stat_regions = stat_objects = stat_planes = stat_pixels = stat_first_tag = 0;
+		stat_regions = stat_objects = stat_planes = stat_pixels = stat_lit = stat_first_tag = 0;
+		if (debug_log && (renders == 60 || renders == 600)) DumpFrame();
 		RenderFrame();
 		if (debug_log || renders <= 3) {
 			LOG_MSG("PowerVR: render #%u obj=%08x page=%08x tlb=%08x,%08x (%uKB) sof=%08x stride=%u pack=%x prec=%08x cam=%04x fog=%u fogcol=%08x xclip=%08x",
@@ -1143,8 +1167,8 @@ public:
 				regs[PCX_SOFADDR], regs[PCX_LSTRIDE], regs[PCX_PACKMODE], regs[PCX_PREC_BASE],
 				regs[PCX_CAMERA] & 0xFFFF, regs[PCX_FOGAMOUNT], regs[PCX_FOGCOL], regs[PCX_XCLIP]);
 			const uint32_t o1 = ObjWord(1);
-			LOG_MSG("PowerVR:   regions=%u objects=%u planes=%u pixels=%u | hdr=%08x obj1=%08x plane=%08x %08x %08x | tag=%x tsp=%08x %08x %08x",
-				stat_regions, stat_objects, stat_planes, stat_pixels, ObjWord(0), o1,
+			LOG_MSG("PowerVR:   regions=%u objects=%u planes=%u pixels=%u non-black=%u | hdr=%08x obj1=%08x plane=%08x %08x %08x | tag=%x tsp=%08x %08x %08x",
+				stat_regions, stat_objects, stat_planes, stat_pixels, stat_lit, ObjWord(0), o1,
 				PlaneWord(o1 & 0x7FFFF), PlaneWord((o1 & 0x7FFFF) + 1), PlaneWord((o1 & 0x7FFFF) + 2),
 				stat_first_tag, FetchParameter(stat_first_tag << 1), FetchParameter((stat_first_tag << 1) + 1),
 				FetchParameter((stat_first_tag << 1) + 2));
