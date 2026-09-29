@@ -157,6 +157,13 @@ The default is therefore **PCX1**, as the brief proposes, with **PCX2** selectab
   PCX2 ("run tombpcx2.exe instead") and needs `sglhw.ini` in `%WINDIR%` only for optional
   settings.
 
+- The same game programs, per frame: `OBJECT_OFFSET` = a physical address (double buffered,
+  confirming the Win32-path reading), `SOF_ADDR` = the S3 linear frame buffer, `LSTRIDE` = 1280,
+  `PACKMODE` = 2 (565), `X_CLIP` = `0x12810000`, then `SOFTRESET` 1/0 and `START_RENDER` = 0.
+  Its TLB entries are **page frame numbers** of physically consecutive **16KB** blocks that are
+  not 16KB aligned, with `PAGE_CTRL` = `0x300`. The slot size is therefore taken from the
+  spacing of the first two TLB entries, and a slot's base is used as is.
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with

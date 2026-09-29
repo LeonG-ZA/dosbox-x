@@ -45,7 +45,7 @@ bool PCI_IsSlotFree(Bits, Bits) { return true; }
 /* ---- display list construction ---- */
 
 static const uint32_t OBJ_BASE = 0x100000;   /* object pointers (physical, PCX1) */
-static const uint32_t PLANE_BASE = 0x200000; /* plane data, reached through the TLB */
+static const uint32_t PLANE_BASE = 0x20B000; /* plane data, reached through the TLB (not 16KB aligned, as in Tomb Raider) */
 static const uint32_t FB_BASE = 0x800000;
 static const int W = 640, H = 480;
 
@@ -129,8 +129,15 @@ static void tex_tsp(uint32_t tag, uint32_t texaddr, int raw_mapsize, bool trans,
 
 static void setup_regs(bool pcx2, uint32_t packmode) {
 	pvr->WriteReg(PCX_INTMASK, INT_END_OF_RENDER);
-	pvr->WriteReg(PCX_PAGE_CTRL, 0);
-	for (int i = 0; i < 256; i++) pvr->WriteReg(PCX_TLB + i, PLANE_BASE + (uint32_t)i * 4096);
+	if (!pcx2) {
+		/* as Tomb Raider (SGL4DOS 1.27): page frame numbers, 16KB slots, PAGE_CTRL = 0x300 */
+		pvr->WriteReg(PCX_PAGE_CTRL, 0x300);
+		for (int i = 0; i < 256; i++) pvr->WriteReg(PCX_TLB + i, (PLANE_BASE >> 12) + (uint32_t)i * 4);
+	}
+	else {
+		pvr->WriteReg(PCX_PAGE_CTRL, 0);
+		for (int i = 0; i < 256; i++) pvr->WriteReg(PCX_TLB + i, PLANE_BASE + (uint32_t)i * 4096);
+	}
 	pvr->WriteReg(PCX_OBJECT_OFFSET, OBJ_BASE);
 	pvr->WriteReg(PCX_SOFADDR, FB_BASE);
 	pvr->WriteReg(PCX_LSTRIDE, W * (packmode == 0 ? 4 : 2));

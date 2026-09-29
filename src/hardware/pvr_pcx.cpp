@@ -392,13 +392,30 @@ public:
 		return TMemWord(regs[PCX_PREC_BASE] + address);
 	}
 
+	/* TLB entry to physical address. Tomb Raider (SGL4DOS 1.27) writes page frame numbers;
+	 * an entry that is page aligned and at or above 1MB is taken as an address. */
+	static uint32_t TLBEntryPhys(uint32_t entry) {
+		if ((entry & 0xFFF) != 0 || entry < 0x100000) return entry << 12;
+		return entry;
+	}
+
+	unsigned tlb_shift = 12;
+
+	/* Page size of the TLB slots. PAGE_CTRL's encoding is not documented (Tomb Raider writes
+	 * 0x300 with 16KB slots), but the driver fills the slots with physically consecutive
+	 * blocks ([W32] DMASBToPCXTLB), so the spacing of the first two entries gives it. */
+	void DetermineTLBPageSize() {
+		const uint32_t p0 = TLBEntryPhys(regs[PCX_TLB]), p1 = TLBEntryPhys(regs[PCX_TLB + 1]);
+		const uint32_t d = p1 - p0;
+		if (regs[PCX_TLB + 1] != 0 && (d == 0x1000 || d == 0x2000 || d == 0x4000))
+			tlb_shift = d == 0x1000 ? 12 : (d == 0x2000 ? 13 : 14);
+		else
+			tlb_shift = 12 + ((regs[PCX_PAGE_CTRL] & 3) > 2 ? 2 : (regs[PCX_PAGE_CTRL] & 3));
+	}
+
 	uint32_t TLBPhys(uint32_t byte_offset) const {
-		const unsigned page_size = regs[PCX_PAGE_CTRL] & 3; /* 0=4K 1=8K 2=16K, see header */
-		const unsigned shift = 12 + (page_size > 2 ? 2 : page_size);
-		const uint32_t slot = (byte_offset >> shift) & 0xFF;
-		uint32_t entry = regs[PCX_TLB + slot];
-		if ((entry & 0xFFF) != 0 || entry < 0x100000) entry <<= 12; /* page frame number */
-		return (entry & ~((1u << shift) - 1)) + (byte_offset & ((1u << shift) - 1));
+		const uint32_t slot = (byte_offset >> tlb_shift) & 0xFF;
+		return TLBEntryPhys(regs[PCX_TLB + slot]) + (byte_offset & ((1u << tlb_shift) - 1));
 	}
 
 	inline uint32_t PlaneWord(uint32_t word_index) const {
@@ -976,6 +993,16 @@ public:
 	std::vector<Object> objects;
 	uint64_t span_plane_budget;
 	uint32_t plane_budget;
+	/* per-render statistics for the diagnostic log */
+	uint32_t stat_regions, stat_objects, stat_planes, stat_pixels, stat_first_tag;
+	unsigned warnings = 0;
+
+	void Warn(const char *msg, uint32_t a, uint32_t b) {
+		if (warnings < 20 || debug_log) {
+			warnings++;
+			LOG_MSG("PowerVR: %s (%08x %08x), render #%u stopped", msg, a, b, renders);
+		}
+	}
 
 	bool DecodePlane(uint32_t addr, Plane &pl) const {
 		if (pcx2 && (regs[PCX_IEEEFP] & 1)) {
@@ -1047,13 +1074,14 @@ public:
 		return ~0u;
 	}
 
-	void ShadeSpan(const CellState *cell, int XSpan, int YLine, RGBi *fb, bool *fb_loaded, bool *fb_dirty) const {
+	void ShadeSpan(const CellState *cell, int XSpan, int YLine, RGBi *fb, bool *fb_loaded, bool *fb_dirty) {
 		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
 			if (!cell[cl].U_id) continue;
 			const int x = XSpan + cl;
 			if (!fb_loaded[cl]) { fb[cl] = ReadFB(x, YLine); fb_loaded[cl] = true; }
 			Texas(x, YLine, cell[cl].U_id << 1, cell[cl].U_shadow, Fog(cell[cl].U_depth), fb[cl]);
 			fb_dirty[cl] = true;
+			if (!stat_first_tag) stat_first_tag = cell[cl].U_id;
 		}
 	}
 
@@ -1100,18 +1128,30 @@ public:
 		}
 
 		for (int cl = 0; cl < NUM_SABRE_CELLS; cl++) {
-			if (fb_dirty[cl] && !XClipped(XSpan + cl)) WriteFB(XSpan + cl, YLine, fb[cl]);
+			if (fb_dirty[cl] && !XClipped(XSpan + cl)) { WriteFB(XSpan + cl, YLine, fb[cl]); stat_pixels++; }
 		}
 	}
 
 	void Render() {
 		renders++;
-		if (debug_log || renders <= 2) {
-			LOG(LOG_MISC, LOG_NORMAL)("PowerVR: render #%u obj=%08x page=%08x tlb0=%08x tlb1=%08x sof=%08x stride=%u pack=%x prec=%08x cam=%04x fog=%u xclip=%08x",
-				renders, regs[PCX_OBJECT_OFFSET], regs[PCX_PAGE_CTRL], regs[PCX_TLB], regs[PCX_TLB + 1],
+		DetermineTLBPageSize();
+		stat_regions = stat_objects = stat_planes = stat_pixels = stat_first_tag = 0;
+		RenderFrame();
+		if (debug_log || renders <= 3) {
+			LOG_MSG("PowerVR: render #%u obj=%08x page=%08x tlb=%08x,%08x (%uKB) sof=%08x stride=%u pack=%x prec=%08x cam=%04x fog=%u fogcol=%08x xclip=%08x",
+				renders, regs[PCX_OBJECT_OFFSET], regs[PCX_PAGE_CTRL], regs[PCX_TLB], regs[PCX_TLB + 1], (1u << tlb_shift) >> 10,
 				regs[PCX_SOFADDR], regs[PCX_LSTRIDE], regs[PCX_PACKMODE], regs[PCX_PREC_BASE],
-				regs[PCX_CAMERA] & 0xFFFF, regs[PCX_FOGAMOUNT], regs[PCX_XCLIP]);
+				regs[PCX_CAMERA] & 0xFFFF, regs[PCX_FOGAMOUNT], regs[PCX_FOGCOL], regs[PCX_XCLIP]);
+			const uint32_t o1 = ObjWord(1);
+			LOG_MSG("PowerVR:   regions=%u objects=%u planes=%u pixels=%u | hdr=%08x obj1=%08x plane=%08x %08x %08x | tag=%x tsp=%08x %08x %08x",
+				stat_regions, stat_objects, stat_planes, stat_pixels, ObjWord(0), o1,
+				PlaneWord(o1 & 0x7FFFF), PlaneWord((o1 & 0x7FFFF) + 1), PlaneWord((o1 & 0x7FFFF) + 2),
+				stat_first_tag, FetchParameter(stat_first_tag << 1), FetchParameter((stat_first_tag << 1) + 1),
+				FetchParameter((stat_first_tag << 1) + 2));
 		}
+	}
+
+	void RenderFrame() {
 		if (regs[PCX_SOFADDR] == 0 || regs[PCX_LSTRIDE] == 0) return;
 
 		LoadFogTable();
@@ -1124,7 +1164,7 @@ public:
 		for (uint32_t region = 0; region < MAX_REGIONS_PER_RENDER; region++) {
 			uint32_t hdr = ObjWordStripped(pos);
 			if (!ResolveLinks(pos, hdr) || !(hdr & REG_COMPULSARY_BITS)) {
-				LOG(LOG_MISC, LOG_WARN)("PowerVR: malformed region list at word %u (%08x), render stopped", pos, hdr);
+				Warn("malformed region list at word/value", pos, hdr);
 				return;
 			}
 			const int xsize = (int)((hdr & 0x1F) + 1) * NUM_SABRE_CELLS;
@@ -1135,14 +1175,17 @@ public:
 			bool error = false;
 			const uint32_t next = DecodeRegion(pos, error);
 			if (error) {
-				LOG(LOG_MISC, LOG_WARN)("PowerVR: malformed object list in region at word %u, render stopped", pos);
+				Warn("malformed object list in region at word", pos, 0);
 				return;
 			}
+			stat_regions++;
+			stat_objects += (uint32_t)objects.size();
+			stat_planes += (uint32_t)planes.size();
 			if (!objects.empty()) {
 				for (int y = ypos; y < ypos + ysize && y < 1024; y++) {
 					for (int x = xpos; x < xpos + xsize && x < 1024; x += NUM_SABRE_CELLS) {
 						if (span_plane_budget < planes.size() + 1) {
-							LOG(LOG_MISC, LOG_WARN)("PowerVR: render exceeded its work limit, stopped");
+							Warn("work limit exceeded at region/planes", stat_regions, (uint32_t)planes.size());
 							return;
 						}
 						span_plane_budget -= planes.size() + 1;
@@ -1153,7 +1196,7 @@ public:
 			if (next == ~0u) return;
 			pos = next;
 		}
-		LOG(LOG_MISC, LOG_WARN)("PowerVR: too many regions, render stopped");
+		Warn("too many regions", stat_regions, 0);
 	}
 };
 
