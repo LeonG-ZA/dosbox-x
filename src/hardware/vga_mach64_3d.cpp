@@ -76,6 +76,7 @@ static struct {
 static inline int64_t sx(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
 
 static uint32_t Mach64_TexPaletteHash(void);
+unsigned int m64snap_zfail = 0, m64snap_rej = 0;   /* TEST HOOK: DOSBOX_X_M64SNAP pixel counters */
 /* TEST HOOK: DOSBOX_X_M64BLACK=1 logs textured trapezoids that sample almost only black */
 static unsigned int dbg_n = 0, dbg_black = 0, dbg_logged = 0; static char dbg_regs[900];
 static int64_t dbg_s0, dbg_t0, dbg_s1, dbg_t1;
@@ -544,7 +545,7 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 	const unsigned int dfmt = R(M64_DP_PIX_WIDTH) & 0xF;
 
 	uint32_t zaddr = 0; uint16_t znew = 0;
-	if (!ZTest(x, y, zaddr, znew)) return false;
+	if (!ZTest(x, y, zaddr, znew)) { m64snap_zfail++; return false; }
 
 	ARGB ic;   /* interpolated colour */
 	ic.r = Clamp8(P.sr); ic.g = Clamp8(P.sg); ic.b = Clamp8(P.sb); ic.a = Clamp8(P.sa);
@@ -557,7 +558,7 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 			if (c3 & (1u << 28)) {       /* TEX_AMASK_AEN: only bit 0 of the alpha */
 				const bool bit = (t.a & 0x80) != 0 || (t.a & 1) != 0;
 				if (!(c3 & (1u << 29))) {     /* 3D-DDI mode: 0 = not drawn, 1 = interpolator alpha */
-					if (!bit) return false;
+					if (!bit) { m64snap_rej++; return false; }
 					t.a = ic.a;
 				}
 				else t.a = bit ? 255 : ic.a;  /* blended edge mode */
@@ -573,7 +574,7 @@ bool Mach64_3D_Pixel(int32_t x, int32_t y, uint32_t /*dst_addr*/, int /*dst_size
 			const uint32_t key = R(M64_CLR_CMP_CLR) & msk;
 			const uint32_t tv = (uint32_t)((t.r << 16) | (t.g << 8) | t.b) & msk;
 			const bool eq = tv == key;
-			if ((ccc & 7) == 1 || ((ccc & 7) == 5 && eq) || ((ccc & 7) == 4 && !eq)) return false;
+			if ((ccc & 7) == 1 || ((ccc & 7) == 5 && eq) || ((ccc & 7) == 4 && !eq)) { m64snap_rej++; return false; }
 		}
 
 		dbg_tx[0] = t.r; dbg_tx[1] = t.g; dbg_tx[2] = t.b;

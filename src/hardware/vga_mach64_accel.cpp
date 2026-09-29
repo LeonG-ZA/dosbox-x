@@ -30,6 +30,11 @@
 #include "logging.h"
 #include "vga.h"
 #include "vga_mach64.h"
+#include <string>
+
+/* TEST HOOK: DOSBOX_X_M64SNAP collects one line per drawing operation for the frame */
+std::string m64snap_log; bool m64snap_on = false; unsigned int m64snap_seq = 0;
+extern unsigned int m64snap_zfail, m64snap_rej;
 
 #define A (mach64.accel)
 
@@ -455,6 +460,8 @@ static bool RectPixel(uint32_t host) {
 	return true;
 }
 
+static bool line3d = false;   /* the running line takes the 3D pixel path (see LinePixel) */
+
 static void StartLine(void) {
 	SetupCommon();
 	A.dst_x = sext(R(M64_DST_X) & 0x1FFF, 13);
@@ -467,6 +474,8 @@ static void StartLine(void) {
 	A.dec = sext(R(M64_DST_BRES_DEC) & 0x3FFFF, 18);
 	A.op = M64_OP_LINE;
 	A.busy = A.x_count > 0;
+	line3d = A.busy && Scale3DFcn() >= 2 && ((R(M64_DP_SRC) >> 8) & 7) == 5;
+	if (line3d) Mach64_3D_TrapBegin();
 }
 
 /* sign of a zero Bresenham error [RRG 4-48, BRES_SIGN_AUTO on GT] */
@@ -479,6 +488,11 @@ static inline bool ErrPositive(int32_t err, bool sign_bit, bool xdir_pos, bool y
 }
 
 /* One pixel of a Bresenham line; true when finished. No 24 bpp lines [PRG 4-7]. */
+/* ASSUMPTION: a line with DP_SRC FRGD_SRC 5 while the 3D engine is on takes
+ * its colour from the 3D pixel path [RRG 4-94], the interpolators stepping one
+ * X step (DST_X_DIR) or Y step per pixel the line moves, as on a trapezoid
+ * edge. Assault Rigs draws its sky's triangle edges as such lines; drawn with
+ * the plain foreground colour they showed as black lines. */
 static bool LinePixel(uint32_t host) {
 	const uint32_t dcntl = R(M64_DST_CNTL);
 	const bool ymajor = (dcntl & M64_DST_Y_MAJOR) != 0;
@@ -501,7 +515,21 @@ static bool LinePixel(uint32_t host) {
 	}
 	if (A.x_count == 1 && !(dcntl & M64_DST_LAST_PEL)) draw = false;
 
-	if (draw) {
+	if (draw && line3d) {
+		if (dx >= A.sc_left && dx <= A.sc_right && A.dst_y >= A.sc_top && A.dst_y <= A.sc_bottom && A.dst_y >= 0) {
+			const uint32_t addr = A.dst_offset + (uint32_t)(A.dst_y * (int32_t)A.dst_pitch + dx);
+			const uint32_t dst = Mach64_ReadPixel(addr, A.dst_size);
+			const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
+			uint32_t out;
+			Mach64_3D_SpanBegin(0, A.xinc > 0 ? 1 : -1);
+			if (!keep && Mach64_3D_Pixel(dx, A.dst_y, addr, A.dst_size, dst, out)) {
+				const uint32_t wm = R(M64_DP_WRITE_MSK);
+				Mach64_WritePixel(addr, A.dst_size, (out & wm) | (dst & ~wm));
+				if (m64snap_on && m64snap_log.size() < (32u << 20)) { char b[80]; snprintf(b, sizeof(b), "  LP %d,%d dst=%04x out=%04x\n", dx, A.dst_y, (unsigned)dst, (unsigned)out); m64snap_log += b; }   /* TEST HOOK */
+			}
+		}
+	}
+	else if (draw) {
 		const uint32_t src = SourceColour(mix ? A.source_fg : A.source_bg, dx, A.dst_y, A.src_x, A.src_y, host, false);
 		DataPathPixel(dx, A.dst_y, mix, src, false);
 	}
@@ -512,10 +540,12 @@ static bool LinePixel(uint32_t host) {
 		mach64.reg[M64_DST_X] = (uint32_t)A.dst_x & 0x1FFF;
 		mach64.reg[M64_DST_Y] = (uint32_t)A.dst_y & 0x7FFF;
 		mach64.reg[M64_DST_BRES_ERR] = (uint32_t)A.err & 0x3FFFF;
+		if (line3d) { Mach64_3D_TrapEnd(); line3d = false; }
 		return true;
 	}
 
 	A.src_x += (R(M64_SRC_CNTL) & M64_SRC_LINE_X_DIR) ? 1 : -1;
+	const int32_t ox = A.dst_x, oy = A.dst_y;
 	if (ymajor) {
 		A.dst_y += A.yinc;
 		if (err_pos) { A.err += A.dec; A.dst_x += A.xinc; }
@@ -525,6 +555,10 @@ static bool LinePixel(uint32_t host) {
 		A.dst_x += A.xinc;
 		if (err_pos) { A.err += A.dec; A.dst_y += A.yinc; }
 		else A.err += A.inc;
+	}
+	if (line3d) {
+		if (A.dst_x != ox) Mach64_3D_EdgeStepX();
+		if (A.dst_y != oy) Mach64_3D_EdgeStepY();
 	}
 	return false;
 }
@@ -602,6 +636,9 @@ static void TrapezoidRun(void) {
 	if ((int32_t)A.dst_pitch > 0 && xmax >= (int32_t)A.dst_pitch) xmax = (int32_t)A.dst_pitch - 1;
 
 	if (use3d) Mach64_3D_TrapBegin();
+	uint32_t sn_drawn = 0, sn_clip = 0, sn_keep = 0, sn_rows = 0; int32_t sn_x0 = 1 << 20, sn_x1 = -(1 << 20), sn_y0 = 1 << 20, sn_y1 = -(1 << 20);   /* TEST HOOK */
+	const unsigned int sn_z0 = m64snap_zfail, sn_r0 = m64snap_rej;
+	const int32_t sn_lx = lead_x, sn_tx = trail_x, sn_y = y, sn_le = lead_err, sn_te = trail_err;
 
 	for (int32_t l = 0; l < lines; l++) {
 		/* ASSUMPTION: a vertical right edge (INC 0) leaves out its x. Its error
@@ -614,6 +651,7 @@ static void TrapezoidRun(void) {
 		int32_t hi = fill_lr ? trail_x : lead_x;
 		static int oldedge = -1; if (oldedge < 0) oldedge = getenv("DOSBOX_X_M64OLDEDGE") ? 1 : 0;   /* TEST HOOK */
 		if (rtedge_dis || (!oldedge && (fill_lr ? trail_inc : lead_inc) == 0)) hi--;
+		if (m64snap_on && lo <= hi) { if (y < A.sc_top || y > A.sc_bottom || y < 0) sn_clip += (uint32_t)(hi - lo + 1); else { if (lo < xmin) sn_clip += (uint32_t)(xmin - lo); if (hi > xmax) sn_clip += (uint32_t)(hi - xmax); } }
 		if (lo <= hi && y >= A.sc_top && y <= A.sc_bottom && y >= 0) {
 			const int32_t dl = lo < xmin ? xmin : lo;
 			int32_t dh = hi + 1;
@@ -630,7 +668,10 @@ static void TrapezoidRun(void) {
 						 * CLR_CMP_SRC 2, is tested in Mach64_3D_Pixel). ATI3DCIF sprites draw
 						 * a keyed mask, then a filtered pass only where the mask colour is */
 						const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
-						if (!keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out)) {
+						if (keep) sn_keep++;
+						const bool sn_ok = !keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out);
+						if (sn_ok) { sn_drawn++; if (x < sn_x0) sn_x0 = x; if (x > sn_x1) sn_x1 = x; if (y < sn_y0) sn_y0 = y; if (y > sn_y1) sn_y1 = y; }
+						if (sn_ok) {
 							/* DP_SRC FRGD_SRC [RRG 4-94]: 5 = the 3D/scaler data; 0/1 put the
 							 * BKGD/FRGD colour where the texel passed (ATI3DCIF's sprite mask) */
 							const unsigned int fsrc = (R(M64_DP_SRC) >> 8) & 7;
@@ -651,6 +692,7 @@ static void TrapezoidRun(void) {
 
 		/* next scan line: both edges, then the interpolators follow the
 		 * leading edge, one Y step and one X step per pixel it moved */
+		if (lo <= hi) sn_rows++;
 		const int32_t lead_dx = EdgeStep(lead_x, lead_err, lead_inc, lead_dec, lead_dir, lead_zneg);
 		EdgeStep(trail_x, trail_err, trail_inc, trail_dec, trail_dir, trail_zneg);
 		if (use3d) {
@@ -670,6 +712,17 @@ static void TrapezoidRun(void) {
 	mach64.reg[M64_DST_BRES_ERR] = (uint32_t)lead_err & 0x3FFFF;
 	mach64.reg[M64_TRAIL_BRES_ERR] = (uint32_t)trail_err & 0x3FFFF;
 	if (use3d) Mach64_3D_TrapEnd();
+	if (m64snap_on && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK */
+		char b[1024];
+		snprintf(b, sizeof(b), "T %u dst=%08x y=%d n=%d lead=%d,%d/%d/%d trail=%d,%d/%d/%d end=%d,%d dcntl=%08x 3d=%08x z=%08x tex=%03x t0=%06x cmp=%08x src=%03x sc=%d-%d,%d-%d rows=%u drawn=%u clip=%u keep=%u zf=%u rej=%u bb=%d,%d-%d,%d R=%08x G=%08x B=%08x A=%08x Z=%08x/%08x/%08x S=%08x/%08x T=%08x/%08x\n",
+			m64snap_seq++, (unsigned)R(M64_DST_OFF_PITCH), sn_y, lines, sn_lx, sn_le, lead_inc, lead_dec * lead_dir, sn_tx, sn_te, trail_inc, trail_dec * trail_dir, lead_x, trail_x,
+			(unsigned)dcntl, (unsigned)R(M64_SCALE_3D_CNTL), (unsigned)R(M64_Z_CNTL), (unsigned)(R(M64_TEX_SIZE_PITCH) & 0xFFF), (unsigned)(R(M64_TEX_0_OFF + ((R(M64_TEX_SIZE_PITCH) >> 4) & 0xF)) & 0xFFFFFF),
+			(unsigned)R(M64_CLR_CMP_CNTL), (unsigned)(R(M64_DP_SRC) & 0xFFF), A.sc_left, A.sc_right, A.sc_top, A.sc_bottom,
+			sn_rows, sn_drawn, sn_clip, sn_keep, m64snap_zfail - sn_z0, m64snap_rej - sn_r0, sn_x0, sn_y0, sn_x1, sn_y1,
+			(unsigned)R(M64_RED_START), (unsigned)R(M64_GREEN_START), (unsigned)R(M64_BLUE_START), (unsigned)R(M64_ALPHA_START),
+			(unsigned)R(M64_Z_START), (unsigned)R(M64_Z_X_INC), (unsigned)R(M64_Z_Y_INC), (unsigned)R(M64_S_START), (unsigned)R(M64_S_XINC_START), (unsigned)R(M64_T_START), (unsigned)R(M64_T_XINC_START));
+		m64snap_log += b;
+	}
 	A.busy = false;
 }
 
@@ -706,6 +759,14 @@ static void StartFillOp(void) {
 				(unsigned)R(M64_DP_SRC), (unsigned)R(M64_DP_FRGD_CLR), (unsigned)R(M64_SC_LEFT_RIGHT), (unsigned)R(M64_SC_TOP_BOTTOM), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_DP_WRITE_MSK));
 		}
 	}
+	if (m64snap_on && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK */
+		char b[400];
+		snprintf(b, sizeof(b), "F %u dst=%08x yx=%08x hw=%08x dcntl=%08x 3d=%08x src=%08x mix=%08x frgd=%08x pixw=%08x cmp=%08x sc=%d-%d,%d-%d\n", m64snap_seq++,
+			(unsigned)R(M64_DST_OFF_PITCH), (unsigned)R(M64_DST_Y_X), (unsigned)R(M64_DST_HEIGHT_WIDTH), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_SCALE_3D_CNTL),
+			(unsigned)R(M64_DP_SRC), (unsigned)R(M64_DP_MIX), (unsigned)R(M64_DP_FRGD_CLR), (unsigned)R(M64_DP_PIX_WIDTH), (unsigned)R(M64_CLR_CMP_CNTL),
+			(int)sext(R(M64_SC_LEFT) & 0x1FFF, 13), (int)sext(R(M64_SC_RIGHT) & 0x1FFF, 13), (int)R(M64_SC_TOP), (int)R(M64_SC_BOTTOM));
+		m64snap_log += b;
+	}
 	Begin();
 	StartFill();
 	if (Scale3DFcn() == 1) Mach64_Scale_Begin();
@@ -727,6 +788,16 @@ static void StartLineOp(void) {
 		/* DRAW_TRAP */
 		TrapezoidRun();
 		return;
+	}
+	if (m64snap_on && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK */
+		char b[800];
+		snprintf(b, sizeof(b), "L %u dst=%08x x=%d y=%d lnth=%08x err=%08x inc=%08x dec=%08x dcntl=%08x src=%08x mix=%08x frgd=%08x 3d=%08x z=%08x tex=%03x t0=%06x R=%08x/%08x/%08x G=%08x B=%08x A=%08x S=%08x/%08x/%08x T=%08x/%08x/%08x\n", m64snap_seq++,
+			(unsigned)R(M64_DST_OFF_PITCH), (int)sext(R(M64_DST_X) & 0x1FFF, 13), (int)sext(R(M64_DST_Y) & 0x7FFF, 15), (unsigned)R(M64_DST_BRES_LNTH), (unsigned)R(M64_DST_BRES_ERR), (unsigned)R(M64_DST_BRES_INC),
+			(unsigned)R(M64_DST_BRES_DEC), (unsigned)R(M64_DST_CNTL), (unsigned)R(M64_DP_SRC), (unsigned)R(M64_DP_MIX), (unsigned)R(M64_DP_FRGD_CLR),
+			(unsigned)R(M64_SCALE_3D_CNTL), (unsigned)R(M64_Z_CNTL), (unsigned)(R(M64_TEX_SIZE_PITCH) & 0xFFF), (unsigned)(R(M64_TEX_0_OFF + ((R(M64_TEX_SIZE_PITCH) >> 4) & 0xF)) & 0xFFFFFF),
+			(unsigned)R(M64_RED_START), (unsigned)R(M64_RED_X_INC), (unsigned)R(M64_RED_Y_INC), (unsigned)R(M64_GREEN_START), (unsigned)R(M64_BLUE_START), (unsigned)R(M64_ALPHA_START),
+			(unsigned)R(M64_S_START), (unsigned)R(M64_S_XINC_START), (unsigned)R(M64_S_Y_INC), (unsigned)R(M64_T_START), (unsigned)R(M64_T_XINC_START), (unsigned)R(M64_T_Y_INC));
+		m64snap_log += b;
 	}
 	StartLine();
 	if (A.busy && !A.source_host) RunToEnd();

@@ -474,6 +474,9 @@ static void Mach64_EIPSample(void) {
 	}
 }
 
+#ifdef _WIN32
+#include <windows.h>   /* TEST HOOK: GetAsyncKeyState for DOSBOX_X_M64SNAPKEY */
+#endif
 #include "vga_mach64_cov.cpp"   /* TEST HOOK (not for upstream) */
 
 /* TEST HOOK (not for upstream): DOSBOX_X_AUTOKEYS="ms:keys;ms:keys" types keys at
@@ -603,7 +606,74 @@ void Mach64_AutoShot(void) {
 	}
 }
 
+extern std::string m64snap_log; extern bool m64snap_on;   /* TEST HOOK */
 void Mach64_VerticalRetrace(void) {
+	{   /* TEST HOOK: DOSBOX_X_M64SNAPKEY=prefix keeps the last 90 frames (their drawing
+		 * operations and the displayed image) and writes them out as prefix_K_I.log/.bin
+		 * (I = 0 oldest) when Scroll Lock is pressed on the host */
+		static int on = -1; static unsigned int frame = 0, trig = 0;
+		struct Snap { std::string log; std::vector<uint8_t> img; std::string head; };
+		static std::vector<Snap> ring; static size_t pos = 0;
+		if (on < 0) { on = getenv("DOSBOX_X_M64SNAPKEY") ? 1 : 0; if (on) { m64snap_on = true; ring.resize(90); } }
+		frame++;
+		if (on) {
+			const Bitu start = Mach64_DisplayStart();
+			const unsigned int pw = Mach64_CRTCPixWidth();
+			const Bitu pitch = (Bitu)((R(M64_CRTC_OFF_PITCH) >> 22) & 0x3FF) * 8u * Mach64_BytesPerPixel(pw);
+			Bitu rows = (Bitu)((R(M64_CRTC_V_TOTAL_DISP) >> 16) & 0x7FF) + 1u;
+			if (rows > 1200) rows = 1200;
+			Snap &sn = ring[pos]; pos = (pos + 1) % ring.size();
+			char h[300];
+			snprintf(h, sizeof(h), "FRAME %u t=%.1f start=%08x pitch_bytes=%u rows=%u pixw=%u crtc_off_pitch=%08x gen=%08x\n", frame, PIC_FullIndex(), (unsigned)start, (unsigned)pitch, (unsigned)rows, pw, (unsigned)R(M64_CRTC_OFF_PITCH), (unsigned)R(M64_CRTC_GEN_CNTL));
+			sn.head = h; sn.log.swap(m64snap_log); m64snap_log.clear();
+			sn.img.resize(pitch * rows);
+			for (Bitu i = 0; i < pitch * rows; i++) sn.img[i] = vga.mem.linear[(start + i) & vga.mem.memmask];
+#ifdef _WIN32
+			if (GetAsyncKeyState(VK_SCROLL) & 1) {
+				trig++;
+				for (size_t k = 0; k < ring.size(); k++) {
+					const Snap &o = ring[(pos + k) % ring.size()];
+					if (o.head.empty()) continue;
+					char fn[600];
+					snprintf(fn, sizeof(fn), "%s_%u_%02u.log", getenv("DOSBOX_X_M64SNAPKEY"), trig, (unsigned)k);
+					FILE *lf = fopen(fn, "wb"); if (lf) { fwrite(o.head.data(), 1, o.head.size(), lf); fwrite(o.log.data(), 1, o.log.size(), lf); fclose(lf); }
+					snprintf(fn, sizeof(fn), "%s_%u_%02u.bin", getenv("DOSBOX_X_M64SNAPKEY"), trig, (unsigned)k);
+					FILE *bf = fopen(fn, "wb"); if (bf) { fwrite(o.img.data(), 1, o.img.size(), bf); fclose(bf); }
+				}
+				LOG_MSG("M64SNAPKEY wrote capture %u", trig);
+			}
+#endif
+		}
+	}
+	{   /* TEST HOOK: DOSBOX_X_M64SNAP=prefix: every 4 s, 4 consecutive frames: the
+		 * drawing operations since the last retrace (prefix_S_F.log) and the displayed
+		 * frame (prefix_S_F.bin, raw; start, pitch and rows in the log), 20 slots rotating */
+		static int on = -1; static double next = 0; static int burst = 0, slot = 0; static unsigned int frame = 0;
+		if (on < 0) on = getenv("DOSBOX_X_M64SNAP") ? 1 : 0;
+		frame++;
+		if (on) {
+			if (burst == 0 && PIC_FullIndex() >= next) { next = PIC_FullIndex() + (getenv("DOSBOX_X_M64SNAPMS") ? atof(getenv("DOSBOX_X_M64SNAPMS")) : 4000.0); burst = 4; slot = (slot + 1) % 20; m64snap_on = true; }
+			else if (burst > 0) {
+				const int f = 4 - burst;
+				const Bitu start = Mach64_DisplayStart();
+				const unsigned int pw = Mach64_CRTCPixWidth();
+				const Bitu pitch = (Bitu)((R(M64_CRTC_OFF_PITCH) >> 22) & 0x3FF) * 8u * Mach64_BytesPerPixel(pw);
+				const Bitu rows = (Bitu)((R(M64_CRTC_V_TOTAL_DISP) >> 16) & 0x7FF) + 1u;
+				char fn[600];
+				snprintf(fn, sizeof(fn), "%s_%02d_%d.log", getenv("DOSBOX_X_M64SNAP"), slot, f);
+				FILE *lf = fopen(fn, "wb");
+				if (lf) {
+					fprintf(lf, "FRAME %u t=%.1f start=%08x pitch_bytes=%u rows=%u pixw=%u crtc_off_pitch=%08x gen=%08x\n", frame, PIC_FullIndex(), (unsigned)start, (unsigned)pitch, (unsigned)rows, pw, (unsigned)R(M64_CRTC_OFF_PITCH), (unsigned)R(M64_CRTC_GEN_CNTL));
+					fwrite(m64snap_log.data(), 1, m64snap_log.size(), lf); fclose(lf);
+				}
+				snprintf(fn, sizeof(fn), "%s_%02d_%d.bin", getenv("DOSBOX_X_M64SNAP"), slot, f);
+				FILE *bf = fopen(fn, "wb");
+				if (bf) { for (Bitu r = 0; r < rows && r < 1200; r++) for (Bitu i = 0; i < pitch; i++) fputc(vga.mem.linear[(start + r * pitch + i) & vga.mem.memmask], bf); fclose(bf); }
+				if (--burst == 0) m64snap_on = false;
+			}
+			m64snap_log.clear();
+		}
+	}
 	{   /* TEST HOOK: DOSBOX_X_M64VRAMOUT rewrites raw video memory plus the register file every 2 s */
 		static int on = -1; static double last = 0;
 		if (on < 0) on = getenv("DOSBOX_X_M64VRAMOUT") ? 1 : 0;
