@@ -322,8 +322,17 @@ public:
 		else PIC_DeActivateIRQ((unsigned int)irq);
 	}
 
+	unsigned trace_count = 0;
+	bool Trace() {
+		if (!debug_log || trace_count >= 4000) return false;
+		if (++trace_count == 4000) LOG_MSG("PowerVR: trace limit reached, further register accesses not logged");
+		return true;
+	}
+
 	uint32_t ReadReg(uint32_t idx) {
 		idx &= PCX_NUM_REGS - 1;
+		if (idx < PCX_FOG_TABLE && idx != PCX_INTSTATUS && Trace())
+			LOG_MSG("PowerVR: read  reg %03x = %08x", idx * 4, regs[idx]);
 		if (idx == PCX_INTSTATUS) {
 			/* reading acknowledges the interrupt [DOS32] isr.asm */
 			const uint32_t v = regs[PCX_INTSTATUS];
@@ -336,6 +345,8 @@ public:
 
 	void WriteReg(uint32_t idx, uint32_t val) {
 		idx &= PCX_NUM_REGS - 1;
+		if ((idx < PCX_FOG_TABLE || (idx >= PCX_TLB && idx < PCX_TLB + 4)) && Trace())
+			LOG_MSG("PowerVR: write reg %03x = %08x", idx * 4, val);
 		switch (idx) {
 			case PCX_ID:
 			case PCX_REVISION:
@@ -1245,6 +1256,13 @@ void MapBARs(uint32_t bar0, uint32_t bar1) {
 
 class PCI_PowerVRDevice : public PCI_Device {
 public:
+	uint32_t config_read(uint8_t regnum, Bitu iolen) override {
+		const uint32_t v = PCI_Device::config_read(regnum, iolen);
+		if (pvr && pvr->Trace())
+			LOG_MSG("PowerVR: PCI config read  %02x len %u = %08x", regnum, (unsigned)iolen, v);
+		return v;
+	}
+
 	PCI_PowerVRDevice(bool pcx2, int irq, uint32_t bar0, uint32_t bar1)
 		: PCI_Device(NEC_VENDOR_ID, pcx2 ? PCX2_DEVICE_ID : PCX1_DEVICE_ID) {
 		config[0x08] = pcx2 ? 0x02 : 0x01; /* revision */
@@ -1266,6 +1284,8 @@ public:
 	}
 
 	void config_write(uint8_t regnum, Bitu iolen, uint32_t value) override {
+		if (pvr && pvr->Trace())
+			LOG_MSG("PowerVR: PCI config write %02x len %u = %08x", regnum, (unsigned)iolen, value);
 		if (iolen == 1) {
 			const unsigned char mask = config_writemask[regnum];
 			config[regnum] = (unsigned char)((config[regnum] & ~mask) | (value & mask));
