@@ -164,6 +164,11 @@ The default is therefore **PCX1**, as the brief proposes, with **PCX2** selectab
   not 16KB aligned, with `PAGE_CTRL` = `0x300`. The slot size is therefore taken from the
   spacing of the first two TLB entries, and a slot's base is used as is.
 
+- The frame buffer is outside system RAM, which DOSBox-X's `phys_read*`/`phys_write*` cannot
+  reach (they silently drop such writes), so frame buffer access goes through
+  `MEM_GetPageHandler()` like a real bus master. With that, Tomb Raider's title screen and
+  in-game demo render correctly (checked by replaying frames saved with `powervr_debug`).
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with

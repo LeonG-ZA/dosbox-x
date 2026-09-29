@@ -945,25 +945,57 @@ public:
 		return (PhysPt)(regs[PCX_SOFADDR] + (uint32_t)y * regs[PCX_LSTRIDE] + (uint32_t)x * OutBytesPerPixel());
 	}
 
+	/* The frame buffer is outside system RAM (the VGA card's linear frame buffer), which
+	 * phys_read/phys_write cannot reach: go through the page handler of the address, as
+	 * a PCI bus master would. */
+	static uint8_t BusReadB(PhysPt a) {
+		PageHandler *h = MEM_GetPageHandler(a >> 12);
+		if (!h) return 0xFF;
+		if (h->getFlags() & PFLAG_READABLE) return h->GetHostReadPt(a >> 12)[a & 0xFFF];
+		return h->readb(a);
+	}
+	static void BusWriteB(PhysPt a, uint8_t v) {
+		PageHandler *h = MEM_GetPageHandler(a >> 12);
+		if (!h) return;
+		if (h->getFlags() & PFLAG_WRITEABLE) h->GetHostWritePt(a >> 12)[a & 0xFFF] = v;
+		else h->writeb(a, v);
+	}
+	static uint16_t BusReadW(PhysPt a) {
+		if ((a & 0xFFF) > 0xFFE) return (uint16_t)(BusReadB(a) | (BusReadB(a + 1) << 8));
+		PageHandler *h = MEM_GetPageHandler(a >> 12);
+		if (!h) return 0xFFFF;
+		if (h->getFlags() & PFLAG_READABLE) { const uint8_t *p = h->GetHostReadPt(a >> 12) + (a & 0xFFF); return (uint16_t)(p[0] | (p[1] << 8)); }
+		return h->readw(a);
+	}
+	static void BusWriteW(PhysPt a, uint16_t v) {
+		if ((a & 0xFFF) > 0xFFE) { BusWriteB(a, (uint8_t)v); BusWriteB(a + 1, (uint8_t)(v >> 8)); return; }
+		PageHandler *h = MEM_GetPageHandler(a >> 12);
+		if (!h) return;
+		if (h->getFlags() & PFLAG_WRITEABLE) { uint8_t *p = h->GetHostWritePt(a >> 12) + (a & 0xFFF); p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+		else h->writew(a, v);
+	}
+	static uint32_t BusReadD(PhysPt a) { return BusReadW(a) | ((uint32_t)BusReadW(a + 2) << 16); }
+	static void BusWriteD(PhysPt a, uint32_t v) { BusWriteW(a, (uint16_t)v); BusWriteW(a + 2, (uint16_t)(v >> 16)); }
+
 	RGBi ReadFB(int x, int y) const {
 		const PhysPt a = PixelAddr(x, y);
 		RGBi c;
 		switch (regs[PCX_PACKMODE] & 3) {
 			case 0: {
-				const uint32_t v = phys_readd(a);
+				const uint32_t v = BusReadD(a);
 				c.r = (int)((v >> 16) & 0xFF); c.g = (int)((v >> 8) & 0xFF); c.b = (int)(v & 0xFF);
 				break;
 			}
 			case 1:
-				c.b = phys_readb(a); c.g = phys_readb(a + 1); c.r = phys_readb(a + 2);
+				c.b = BusReadB(a); c.g = BusReadB(a + 1); c.r = BusReadB(a + 2);
 				break;
 			case 2: {
-				const uint32_t v = phys_readw(a);
+				const uint32_t v = BusReadW(a);
 				c.r = (int)((v >> 11) & 0x1F) << 3; c.g = (int)((v >> 5) & 0x3F) << 2; c.b = (int)(v & 0x1F) << 3;
 				break;
 			}
 			default: {
-				const uint32_t v = phys_readw(a);
+				const uint32_t v = BusReadW(a);
 				c.r = (int)((v >> 10) & 0x1F) << 3; c.g = (int)((v >> 5) & 0x1F) << 3; c.b = (int)(v & 0x1F) << 3;
 				break;
 			}
@@ -974,10 +1006,10 @@ public:
 	void WriteFB(int x, int y, const RGBi &c) const {
 		const PhysPt a = PixelAddr(x, y);
 		switch (regs[PCX_PACKMODE] & 3) {
-			case 0: phys_writed(a, ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | (uint32_t)c.b); break;
-			case 1: phys_writeb(a, (uint8_t)c.b); phys_writeb(a + 1, (uint8_t)c.g); phys_writeb(a + 2, (uint8_t)c.r); break;
-			case 2: phys_writew(a, (uint16_t)(((c.r >> 3) << 11) | ((c.g >> 2) << 5) | (c.b >> 3))); break;
-			default: phys_writew(a, (uint16_t)(((c.r >> 3) << 10) | ((c.g >> 3) << 5) | (c.b >> 3))); break;
+			case 0: BusWriteD(a, ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | (uint32_t)c.b); break;
+			case 1: BusWriteB(a, (uint8_t)c.b); BusWriteB(a + 1, (uint8_t)c.g); BusWriteB(a + 2, (uint8_t)c.r); break;
+			case 2: BusWriteW(a, (uint16_t)(((c.r >> 3) << 11) | ((c.g >> 2) << 5) | (c.b >> 3))); break;
+			default: BusWriteW(a, (uint16_t)(((c.r >> 3) << 10) | ((c.g >> 3) << 5) | (c.b >> 3))); break;
 		}
 	}
 

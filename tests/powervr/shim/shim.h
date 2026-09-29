@@ -52,8 +52,17 @@ public:
 	virtual void writed(PhysPt, uint32_t) {}
 	virtual HostPt GetHostReadPt(PageNum) { return NULL; }
 	virtual HostPt GetHostWritePt(PageNum) { return NULL; }
+	Bitu getFlags() const { return flags; }
 	Bitu flags;
 };
+/* all of the shim's physical address space is RAM with host pointers */
+class ShimRAMHandler : public PageHandler {
+public:
+	ShimRAMHandler() : PageHandler(PFLAG_READABLE | PFLAG_WRITEABLE) {}
+	HostPt GetHostReadPt(PageNum p) override { return &shim_ram[((size_t)p << 12) % shim_ram.size()]; }
+	HostPt GetHostWritePt(PageNum p) override { return GetHostReadPt(p); }
+};
+static inline PageHandler *MEM_GetPageHandler(Bitu) { static ShimRAMHandler h; return &h; }
 class MEM_CalloutObject;
 typedef PageHandler *(MEM_CalloutHandler)(MEM_CalloutObject &co, Bitu phys_page);
 class MEM_CalloutObject {
