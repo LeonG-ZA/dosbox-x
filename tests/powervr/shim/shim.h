@@ -109,4 +109,5 @@ public:
 extern bool pcibus_enable;
 Bits RegisterPCIDevice(PCI_Device *device, Bits bus = -1, Bits slot = -1);
 bool UnregisterPCIDevice(PCI_Device *device);
+bool PCI_IsSlotFree(Bits bus, Bits slot);
 #endif

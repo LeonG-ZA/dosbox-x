@@ -1340,7 +1340,12 @@ void PVR_OnPowerOn(Section * /*sec*/) {
 	const uint32_t bar1 = base, bar0 = base + TMEM_SIZE;
 
 	pvr_pci = new PCI_PowerVRDevice(pvr->pcx2, irq, bar0, bar1);
-	RegisterPCIDevice(pvr_pci);
+	/* Never slot 0: the DOS SGL identifies the board by (bus << 8) | (device << 3) | function
+	 * and treats 0 as "no PCX found" (Tomb Raider's tombpcx1.exe exits silently). On real
+	 * hardware slot 0 is the host bridge. */
+	Bits slot = 1;
+	while (slot < 32 && !PCI_IsSlotFree(0, slot)) slot++;
+	RegisterPCIDevice(pvr_pci, 0, slot < 32 ? slot : -1);
 	MapBARs(bar0, bar1);
 	LOG_MSG("PowerVR %s installed: registers at %08x, 4MB texture memory at %08x, IRQ %d",
 		pvr->pcx2 ? "PCX2" : "PCX1", bar0, bar1, irq);

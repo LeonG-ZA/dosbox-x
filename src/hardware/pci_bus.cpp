@@ -440,6 +440,11 @@ Bits RegisterPCIDevice(PCI_Device* device, Bits bus, Bits slot) {
 	return slot;
 }
 
+bool PCI_IsSlotFree(Bits bus, Bits slot) {
+	if (bus < 0 || bus >= PCI_MAX_PCIBUSSES || slot < 0 || slot >= PCI_MAX_PCIDEVICES) return false;
+	return pci_devices[bus][slot] == NULL;
+}
+
 static void Deinitialize(void) {
 	initialized=false;
 	pci_caddress=0;

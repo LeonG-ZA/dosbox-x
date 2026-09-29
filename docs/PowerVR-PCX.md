@@ -148,6 +148,15 @@ The default is therefore **PCX1**, as the brief proposes, with **PCX2** selectab
   - read and wrote registers
   - started a render, then saw `INT_STATUS` = 2 and saw the read acknowledge it
 
+## Findings from real software
+
+- **Tomb Raider (PowerVR DOS port, `tombpcx1.exe`, SGL4DOS 1.27)**: the game identifies the
+  board by the handle `(bus << 8) | (device << 3) | function` from its own PCI scan, and treats
+  a handle of 0 as "PCX1 not found", exiting without an on-screen message. The card is therefore
+  never placed in bus 0 slot 0 (on real PCs that is the host bridge). `tombpcx1.exe` rejects a
+  PCX2 ("run tombpcx2.exe instead") and needs `sglhw.ini` in `%WINDIR%` only for optional
+  settings.
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with

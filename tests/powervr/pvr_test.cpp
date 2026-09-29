@@ -40,6 +40,7 @@ void AddExitFunction(SectionFunc, bool) {}
 void AddVMEventFunction(int, SectionFunc) {}
 Bits RegisterPCIDevice(PCI_Device *, Bits, Bits) { return 0; }
 bool UnregisterPCIDevice(PCI_Device *) { return true; }
+bool PCI_IsSlotFree(Bits, Bits) { return true; }
 
 /* ---- display list construction ---- */
 

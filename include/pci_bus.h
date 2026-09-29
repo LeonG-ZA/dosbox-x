@@ -95,6 +95,7 @@ bool PCI_IsInitialized();
 
 Bits RegisterPCIDevice(PCI_Device* device, Bits bus=-1, Bits slot=-1);
 bool UnregisterPCIDevice(PCI_Device* device);
+bool PCI_IsSlotFree(Bits bus, Bits slot);
 
 void PCI_AddSVGAS3_Device(void);
 void PCI_RemoveSVGAS3_Device(void);
