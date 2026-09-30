@@ -675,6 +675,7 @@ static void TrapezoidRun(void) {
 						const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
 						if (keep) sn_keep++;
 						const bool sn_ok = !keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out);
+						if (m64snap_on && (l == 0 || l == lines - 1) && Scale3DFcn() == 2 && m64snap_wl < m64snap_sl && m64snap_log.size() < (32u << 20)) { char b[200]; snprintf(b, sizeof(b), "  BP %d,%d row=%d/%d ok=%d u=%lld v=%lld wl=%u hl=%u sl=%u out=%04x\n", x, y, (int)l, (int)lines, (int)sn_ok, (long long)m64snap_u, (long long)m64snap_v, m64snap_wl, m64snap_hl, m64snap_sl, sn_ok ? (unsigned)out : 0u); m64snap_log += b; }   /* TEST HOOK */
 						if (m64snap_on && x == dh - 1 && Scale3DFcn() == 2 && m64snap_log.size() < (32u << 20)) { char b[200]; snprintf(b, sizeof(b), "  RP %d,%d ok=%d u=%lld v=%lld wl=%u hl=%u pl=%u sl=%u out=%04x dst=%04x\n", x, y, (int)sn_ok, (long long)m64snap_u, (long long)m64snap_v, m64snap_wl, m64snap_hl, m64snap_pl, m64snap_sl, sn_ok ? (unsigned)out : 0u, (unsigned)dst); m64snap_log += b; }   /* TEST HOOK */
 						if (sn_ok) { sn_drawn++; if (x < sn_x0) sn_x0 = x; if (x > sn_x1) sn_x1 = x; if (y < sn_y0) sn_y0 = y; if (y > sn_y1) sn_y1 = y; }
 						if (sn_ok) {

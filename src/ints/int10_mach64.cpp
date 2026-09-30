@@ -340,6 +340,10 @@ static const Mach64_Res mach64_res[] = {
 	{ 0xE3,  320,  240,  400,  328,  48,  525,  490, 2,  1259, true,  true,  true  },
 	{ 0xE5,  400,  300,  528,  424,  64,  628,  601, 4,  2000, false, false, true  },
 	{ 0xE4,  512,  384,  672,  528,  64,  806,  771, 6,  3250, true,  true,  true  },
+	/* E2h [PRG-215R3 A-2]: Assault Rigs' resolution list starts at 320x200;
+	 * without it DirectDraw refused the mode (black screen, "ERROR 4005 ...
+	 * Can't set resolution"). 640x400 70 Hz timings halved, double scanned. */
+	{ 0xE2,  320,  200,  400,  328,  48,  449,  413, 2,  1259, true,  false, true  },
 };
 
 /* A000h: program the accelerator CRTC [PRG-215R3 A-2] from the built-in
