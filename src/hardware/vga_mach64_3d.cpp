@@ -76,7 +76,8 @@ static struct {
 static inline int64_t sx(unsigned int reg, int bits) { return (int64_t)sext(R(reg), bits); }
 
 static uint32_t Mach64_TexPaletteHash(void);
-unsigned int m64snap_zfail = 0, m64snap_rej = 0;   /* TEST HOOK: DOSBOX_X_M64SNAP pixel counters */
+unsigned int m64snap_zfail = 0, m64snap_rej = 0;
+int64_t m64snap_u = 0, m64snap_v = 0; unsigned int m64snap_wl = 0, m64snap_hl = 0, m64snap_pl = 0, m64snap_sl = 0;   /* TEST HOOK: last sampled coordinate (texels, 8 fraction bits) */   /* TEST HOOK: DOSBOX_X_M64SNAP pixel counters */
 /* TEST HOOK: DOSBOX_X_M64BLACK=1 logs textured trapezoids that sample almost only black */
 static unsigned int dbg_n = 0, dbg_black = 0, dbg_logged = 0; static char dbg_regs[900];
 static int64_t dbg_s0, dbg_t0, dbg_s1, dbg_t1;
@@ -373,17 +374,52 @@ static ARGB SampleLevel(unsigned int level, int64_t s16, int64_t t16, bool bilin
 	const int shv = 16 + TEX_COORD_BITS - (int)w_log - 8;   /* T uses the width scale as well: square coordinate space */
 	int64_t u = (sh >= 0) ? (s16 >> sh) : (s16 << -sh);
 	int64_t v = (shv >= 0) ? (t16 >> shv) : (t16 << -shv);
-	const uint32_t wmask = (1u << wm_log) - 1, hmask = (1u << h_log) - 1;
-
+	/* ASSUMPTION: a narrow map (TEX_PITCH < TEX_SIZE: fewer texels across
+	 * than the square S/T space) has nothing past its width. S wraps at
+	 * TEX_SIZE; a sample point past the width is not drawn (a black texel,
+	 * which the texel colour key removes) and the bilinear taps stop at the
+	 * map's edges instead of wrapping. Wrapping at the width drew the tile's
+	 * first column past its right edge: white dashes around Assault Rigs'
+	 * moving logo, which real hardware draws cleanly. Unverified beyond that.
+	 * TEST HOOK DOSBOX_X_M64NARROW: 0 wrap at the width (old), 1 wrap at
+	 * TEX_SIZE, 2 black past the width without the filter change, 3 this. */
+	static int narrow = -1; if (narrow < 0) narrow = getenv("DOSBOX_X_M64NARROW") ? atoi(getenv("DOSBOX_X_M64NARROW")) : 3;
+	const uint32_t wmask = (1u << (narrow ? w_log : wm_log)) - 1, hmask = (1u << h_log) - 1;
+	const uint32_t wlim = 1u << wm_log;
+	auto Tex = [&](uint32_t x, uint32_t y) -> ARGB {
+		if (narrow == 2 && x >= wlim) { ARGB k; k.a = 0; k.r = k.g = k.b = 0; return k; }
+		return FetchTexel(base, pitch, x, y, fmt);
+	};
+	m64snap_u = u; m64snap_v = v; m64snap_wl = wm_log; m64snap_hl = h_log; m64snap_pl = pitch_log; m64snap_sl = w_log;   /* TEST HOOK */
+	const bool narrow_map = wm_log < w_log;
+	if (narrow == 3 && narrow_map) {
+		/* the sample point past the width: nothing (keyed); the filter taps stop at the map's edges */
+		const uint32_t smask = (1u << w_log) - 1;
+		if ((((uint32_t)(u >> 8)) & smask) >= wlim) { ARGB k; k.a = 0; k.r = k.g = k.b = 0; return k; }
+		if (!bilinear) return FetchTexel(base, pitch, (uint32_t)(u >> 8) & smask, (uint32_t)(v >> 8) & hmask, fmt);
+		const int64_t uc = u, vc = v;
+		u -= 128; v -= 128;
+		const int32_t cx = (int32_t)((uint32_t)(uc >> 8) & smask), cy = (int32_t)((uint32_t)(vc >> 8) & hmask);
+		int32_t x0 = (int32_t)((uint32_t)(u >> 8) & smask), y0 = (int32_t)((uint32_t)(v >> 8) & hmask);
+		int fu = (int)(u & 0xFF), fv = (int)(v & 0xFF);
+		if (x0 > cx) { x0 = cx; fu = 0; }   /* the tap left or above wrapped around: stay at the edge */
+		if (y0 > cy) { y0 = cy; fv = 0; }
+		int32_t x1 = x0 + 1, y1 = y0 + 1;
+		if (x1 >= (int32_t)wlim) x1 = (int32_t)wlim - 1;
+		if (y1 > (int32_t)hmask) y1 = (int32_t)hmask;
+		const ARGB c00 = FetchTexel(base, pitch, (uint32_t)x0, (uint32_t)y0, fmt), c10 = FetchTexel(base, pitch, (uint32_t)x1, (uint32_t)y0, fmt);
+		const ARGB c01 = FetchTexel(base, pitch, (uint32_t)x0, (uint32_t)y1, fmt), c11 = FetchTexel(base, pitch, (uint32_t)x1, (uint32_t)y1, fmt);
+		return Lerp(Lerp(c00, c10, fu), Lerp(c01, c11, fu), fv);
+	}
 	if (!bilinear) {
-		return FetchTexel(base, pitch, (uint32_t)(u >> 8) & wmask, (uint32_t)(v >> 8) & hmask, fmt);
+		return Tex((uint32_t)(u >> 8) & wmask, (uint32_t)(v >> 8) & hmask);
 	}
 	u -= 128; v -= 128;
 	const uint32_t x0 = (uint32_t)(u >> 8) & wmask, y0 = (uint32_t)(v >> 8) & hmask;
 	const uint32_t x1 = (x0 + 1) & wmask, y1 = (y0 + 1) & hmask;
 	const int fu = (int)(u & 0xFF), fv = (int)(v & 0xFF);
-	const ARGB c00 = FetchTexel(base, pitch, x0, y0, fmt), c10 = FetchTexel(base, pitch, x1, y0, fmt);
-	const ARGB c01 = FetchTexel(base, pitch, x0, y1, fmt), c11 = FetchTexel(base, pitch, x1, y1, fmt);
+	const ARGB c00 = Tex(x0, y0), c10 = Tex(x1, y0);
+	const ARGB c01 = Tex(x0, y1), c11 = Tex(x1, y1);
 	return Lerp(Lerp(c00, c10, fu), Lerp(c01, c11, fu), fv);
 }
 

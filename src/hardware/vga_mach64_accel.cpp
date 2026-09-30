@@ -35,6 +35,7 @@
 /* TEST HOOK: DOSBOX_X_M64SNAP collects one line per drawing operation for the frame */
 std::string m64snap_log; bool m64snap_on = false; unsigned int m64snap_seq = 0;
 extern unsigned int m64snap_zfail, m64snap_rej;
+extern int64_t m64snap_u, m64snap_v; extern unsigned int m64snap_wl, m64snap_hl, m64snap_pl, m64snap_sl;
 
 #define A (mach64.accel)
 
@@ -641,16 +642,20 @@ static void TrapezoidRun(void) {
 	const int32_t sn_lx = lead_x, sn_tx = trail_x, sn_y = y, sn_le = lead_err, sn_te = trail_err;
 
 	for (int32_t l = 0; l < lines; l++) {
-		/* ASSUMPTION: a vertical right edge (INC 0) leaves out its x. Its error
-		 * (DEC/2 from ATI3DCIF, whichever X direction is set) puts the edge half
-		 * a pixel left of x, so x's centre is outside; including it drew the next
-		 * glyph's or tile's first column (Wipeout and Assault Rigs text, the
-		 * Assault Rigs logo). Sloped edges keep the right x: leaving it out
-		 * cracked the meshes. The next quad's left edge starts at this x. */
+		/* ASSUMPTION: the right edge's x is drawn (DST_POLYGON_RTEDGE_DIS
+		 * [RRG 4-48] leaves it out), except for a vertical trailing edge on the
+		 * right (TRAP_FILL_DIR 1, TRAIL_BRES_INC 0). ATI3DCIF's text quads end on
+		 * such an edge one past the glyph: drawing it showed the next glyph's first
+		 * column (Wipeout and Assault Rigs text). A vertical leading edge on the
+		 * right keeps its x: Wipeout's pilot logo tiles end there and had gaps
+		 * without it. A trailing edge stepping left with a positive error (not
+		 * yet stepped: the first row of a triangle) lies left of its x, so the x
+		 * is left out too (the dot at the top right of Wipeout's glyphs).
+		 * Otherwise sloped edges keep the x (Assault Rigs' meshes cracked). */
 		const int32_t lo = fill_lr ? lead_x : trail_x;
 		int32_t hi = fill_lr ? trail_x : lead_x;
-		static int oldedge = -1; if (oldedge < 0) oldedge = getenv("DOSBOX_X_M64OLDEDGE") ? 1 : 0;   /* TEST HOOK */
-		if (rtedge_dis || (!oldedge && (fill_lr ? trail_inc : lead_inc) == 0)) hi--;
+		static int oldedge = -1; if (oldedge < 0) oldedge = getenv("DOSBOX_X_M64OLDEDGE") ? 1 : 0;   /* TEST HOOK: always draw the right x */
+		if (rtedge_dis || (!oldedge && fill_lr && (trail_inc == 0 || (trail_dir < 0 && trail_err > 0)))) hi--;
 		if (m64snap_on && lo <= hi) { if (y < A.sc_top || y > A.sc_bottom || y < 0) sn_clip += (uint32_t)(hi - lo + 1); else { if (lo < xmin) sn_clip += (uint32_t)(xmin - lo); if (hi > xmax) sn_clip += (uint32_t)(hi - xmax); } }
 		if (lo <= hi && y >= A.sc_top && y <= A.sc_bottom && y >= 0) {
 			const int32_t dl = lo < xmin ? xmin : lo;
@@ -670,6 +675,7 @@ static void TrapezoidRun(void) {
 						const bool keep = ((R(M64_CLR_CMP_CNTL) >> 24) & 3) == 0 && ColourCompare(0, dst, false, 0);
 						if (keep) sn_keep++;
 						const bool sn_ok = !keep && Mach64_3D_Pixel(x, y, addr, A.dst_size, dst, out);
+						if (m64snap_on && x == dh - 1 && Scale3DFcn() == 2 && m64snap_log.size() < (32u << 20)) { char b[200]; snprintf(b, sizeof(b), "  RP %d,%d ok=%d u=%lld v=%lld wl=%u hl=%u pl=%u sl=%u out=%04x dst=%04x\n", x, y, (int)sn_ok, (long long)m64snap_u, (long long)m64snap_v, m64snap_wl, m64snap_hl, m64snap_pl, m64snap_sl, sn_ok ? (unsigned)out : 0u, (unsigned)dst); m64snap_log += b; }   /* TEST HOOK */
 						if (sn_ok) { sn_drawn++; if (x < sn_x0) sn_x0 = x; if (x > sn_x1) sn_x1 = x; if (y < sn_y0) sn_y0 = y; if (y > sn_y1) sn_y1 = y; }
 						if (sn_ok) {
 							/* DP_SRC FRGD_SRC [RRG 4-94]: 5 = the 3D/scaler data; 0/1 put the
