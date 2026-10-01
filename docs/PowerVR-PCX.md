@@ -186,6 +186,13 @@ byte-identical images.
   writes stay in list order on the emulation thread; overlapping regions fall back to
   one-at-a-time.
 
+- **Windows 9x driver (VideoLogic, VSGL.VXD 4.1.2.3, August 1998)**: its Plug and Play start
+  handler reads the PCX2's `REVISION` register and only assigns a board type for 1 (`MIDAS5`) or
+  3 (`MIDAS5_003`); anything else leaves the board unusable and `SGL.DLL` fails to load ("The
+  SGL.DLL file cannot start"). `REVISION` and the PCI revision ID are therefore 1. The repeated
+  "write 0 to config register 0, read it back" accesses seen from it are the driver's own
+  `PCIFindBoard` fallback scan (`win32/pci.asm`, "get around bridge bug"), and are harmless.
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with

@@ -58,7 +58,8 @@
  *   - Where the driver copies the TSP parameters is also in the VxD. They are read from
  *     texture memory at PREC_BASE (a 32-bit word offset: the driver's ISP_BASE value
  *     0x80000 is commented as "the bottom of the second bank", i.e. 2MB).
- *   - PCX_ID/PCX_REVISION read-back values are unknown; the PCI IDs are returned.
+ *   - The PCX_ID read-back value is unknown; the PCI IDs are returned. PCX_REVISION is 1:
+ *     the Windows VSGL.VXD takes PCX2 revision 1 as MIDAS5 (PCX2) and 3 as MIDAS5_003.
  *   - X_CLIP is taken to discard pixels left of / right of the programmed columns.
  *   - The dither bit of PACKMODE is ignored (output is truncated).
  *   - Depth values that overflow the ISP's 32-bit comparator are saturated rather than
@@ -330,7 +331,11 @@ public:
 	void Reset() {
 		memset(regs, 0, sizeof(regs));
 		regs[PCX_ID] = ((uint32_t)(pcx2 ? PCX2_DEVICE_ID : PCX1_DEVICE_ID) << 16) | NEC_VENDOR_ID;
-		regs[PCX_REVISION] = pcx2 ? 0x02 : 0x01;
+		/* The Windows 9x VSGL.VXD (4.1.2.3) reads REVISION of a PCX2 and only accepts
+		 * 1 (MIDAS5, the original PCX2) or 3 (MIDAS5_003, whose extra blend modes are not
+		 * emulated); any other value leaves the board without a type and SGL.DLL fails
+		 * to start. It does not read it for a PCX1. */
+		regs[PCX_REVISION] = 0x01;
 		prev_intern_out = prev_none;
 		UpdateIRQ();
 	}
@@ -1661,7 +1666,7 @@ public:
 
 	PCI_PowerVRDevice(bool pcx2, int irq, uint32_t bar0, uint32_t bar1)
 		: PCI_Device(NEC_VENDOR_ID, pcx2 ? PCX2_DEVICE_ID : PCX1_DEVICE_ID) {
-		config[0x08] = pcx2 ? 0x02 : 0x01; /* revision */
+		config[0x08] = 0x01;               /* revision, as the REVISION register */
 		config[0x09] = 0x00;
 		config[0x0a] = 0x80;               /* subclass: other display controller */
 		config[0x0b] = 0x03;               /* class: display controller */
