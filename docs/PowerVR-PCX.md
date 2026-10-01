@@ -193,6 +193,14 @@ byte-identical images.
   "write 0 to config register 0, read it back" accesses seen from it are the driver's own
   `PCIFindBoard` fallback scan (`win32/pci.asm`, "get around bridge bug"), and are harmless.
 
+- **MechWarrior 2 PowerVR Edition (Windows 98, PCX2)** renders correctly, but SGL does all
+  geometry (matrix/vector transforms, plane setup, tile binning) on the CPU in x87 floating
+  point; the guest CPU profiler (`powervr_debug`) showed ~40% of guest time in SGLMID5.DLL's
+  transform routines. Since DOSBox-X's dynamic core passes FPU instructions to the normal core
+  by default, set `use dynamic core with fpu=true` in `[cpu]` (note: not `fpu=true`, which is a
+  different option). That took the game from ~6 to ~35 frames/s; the renderer itself needs
+  ~8.5 ms per frame on 8 threads. This setting can affect FPU task switching under Windows 9x.
+
 ## Next steps
 
 - Run Actua Soccer Club Edition and Flight Unlimited (PowerVR builds) with
