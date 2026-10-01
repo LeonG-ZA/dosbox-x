@@ -75,6 +75,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <vector>
+#include <map>
 #include <string>
 #include <atomic>
 #include <thread>
@@ -91,6 +92,11 @@
 #include "paging.h"
 #include "pic.h"
 #include "pci_bus.h"
+#if !defined(PVR_TEST_SHIM_H)
+#include "regs.h"
+#include "cpu.h"
+#define PVR_GUEST_PROFILER 1
+#endif
 
 namespace {
 
@@ -1450,6 +1456,26 @@ public:
 		LOG_MSG("PowerVR: render #%u saved to %s", renders, name);
 	}
 
+	/* powervr_debug guest CPU sampling profiler: linear 4KB code page (bit 0 = ring 0) ->
+	 * samples, for finding where a game spends its time between frames */
+	std::map<uint32_t, uint32_t> prof_pages;
+	uint32_t prof_total = 0;
+
+	void ReportProfile() {
+		if (!prof_total) return;
+		std::vector<std::pair<uint32_t, uint32_t> > v(prof_pages.begin(), prof_pages.end());
+		std::sort(v.begin(), v.end(), [](const std::pair<uint32_t, uint32_t> &a, const std::pair<uint32_t, uint32_t> &b) { return a.second > b.second; });
+		std::string line;
+		for (size_t i = 0; i < v.size() && i < 12; i++) {
+			char b[48];
+			snprintf(b, sizeof(b), " %08x%s %.1f%%", v[i].first & ~1u, (v[i].first & 1) ? "(r0)" : "", 100.0 * v[i].second / prof_total);
+			line += b;
+		}
+		LOG_MSG("PowerVR:   guest CPU hot pages (%u samples):%s", prof_total, line.c_str());
+		prof_pages.clear();
+		prof_total = 0;
+	}
+
 	std::chrono::steady_clock::time_point perf_start = std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point perf_render_end, perf_ack_time;
 	double perf_render_s = 0, perf_ack_s = 0, perf_gap_s = 0;
@@ -1484,6 +1510,7 @@ public:
 				LOG_MSG("PowerVR:   end-of-render acknowledged %u times, after %.1f ms on average; next render started %.1f ms after the acknowledgement; %.1f INT_STATUS reads per frame; IRQ %d %s",
 					perf_acks, perf_acks ? 1000.0 * perf_ack_s / perf_acks : 0.0, perf_gaps ? 1000.0 * perf_gap_s / perf_gaps : 0.0,
 					(double)perf_status_reads / perf_frames, irq, (regs[PCX_INTMASK] & INT_END_OF_RENDER) ? "unmasked" : "masked");
+				ReportProfile();
 				perf_frames = 0;
 				perf_render_s = 0;
 				perf_acks = perf_gaps = perf_status_reads = 0;
@@ -1748,6 +1775,16 @@ public:
 PCI_PowerVRDevice *pvr_pci = NULL;
 uint32_t pvr_assigned_base = 0;
 
+#if PVR_GUEST_PROFILER
+void PVR_ProfileSample(Bitu /*val*/) {
+	if (!pvr || !pvr->debug_log) return;
+	const uint32_t lin = (uint32_t)(SegPhys(cs) + reg_eip);
+	pvr->prof_pages[(lin & ~0xFFFu) | (cpu.cpl == 0 ? 1u : 0u)]++;
+	pvr->prof_total++;
+	PIC_AddEvent(PVR_ProfileSample, 0.25);
+}
+#endif
+
 void PVR_Destroy(Section * /*sec*/) {
 	if (pvr_pci) {
 		UnregisterPCIDevice(pvr_pci);
@@ -1757,6 +1794,9 @@ void PVR_Destroy(Section * /*sec*/) {
 	FreeCallout(reg_cb);
 	FreeCallout(tmem_cb);
 	PAGING_ClearTLB();
+#if PVR_GUEST_PROFILER
+	PIC_RemoveEvents(PVR_ProfileSample);
+#endif
 	delete pvr;
 	pvr = NULL;
 }
@@ -1785,6 +1825,9 @@ void PVR_OnPowerOn(Section * /*sec*/) {
 		if (threads > 8) threads = 8;
 	}
 	pvr->num_threads = threads < 1 ? 1 : (unsigned)threads;
+#if PVR_GUEST_PROFILER
+	if (pvr->debug_log) PIC_AddEvent(PVR_ProfileSample, 0.25);
+#endif
 
 	/* 8MB window: texture memory in the first 4MB, registers at the start of the second */
 	uint32_t base = pvr_assigned_base;
