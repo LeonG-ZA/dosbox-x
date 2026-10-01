@@ -3540,7 +3540,8 @@ void DOSBOX_SetupConfigSections(void) {
     Pint->Set_help("Number of host CPU threads used to render PowerVR frames. 0 (default) uses one per CPU core, up to 8.");
 
     Pbool = secprop->Add_bool("powervr_debug",Property::Changeable::OnlyAtStart,false);
-    Pbool->Set_help("Log the PowerVR display list registers of every render (for troubleshooting).");
+    Pbool->Set_help("Log PowerVR register accesses, frame statistics and render performance, and save renders #60 and #600\n"
+                    "to pvrdump_NNNN.bin (for troubleshooting; slows emulation down).");
 
     secprop=control->AddSection_prop("mixer",&Null_Init);
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);

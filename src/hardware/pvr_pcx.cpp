@@ -78,6 +78,7 @@
 #include <string>
 #include <atomic>
 #include <thread>
+#include <chrono>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -1439,13 +1440,34 @@ public:
 		LOG_MSG("PowerVR: render #%u saved to %s", renders, name);
 	}
 
+	std::chrono::steady_clock::time_point perf_start = std::chrono::steady_clock::now();
+	double perf_render_s = 0;
+	unsigned perf_frames = 0;
+
 	void Render() {
 		renders++;
 		DetermineTLBPageSize();
 		stat_regions = stat_objects = stat_planes = stat_pixels = stat_lit = stat_first_tag = 0;
 		if (debug_log && (renders == 60 || renders == 600)) DumpFrame();
+		const auto t0 = std::chrono::steady_clock::now();
 		RenderFrame();
-		if (debug_log || renders <= 3) {
+		const auto t1 = std::chrono::steady_clock::now();
+		if (debug_log) {
+			/* every ~3 s of host time: frames the guest submitted and the host time spent
+			 * rendering them, to tell renderer cost apart from the rest of the emulation */
+			perf_render_s += std::chrono::duration<double>(t1 - t0).count();
+			perf_frames++;
+			const double wall = std::chrono::duration<double>(t1 - perf_start).count();
+			if (perf_frames == 1 && wall > 10.0) perf_start = t0;
+			else if (wall >= 3.0) {
+				LOG_MSG("PowerVR: %.1f frames/s submitted, %.1f ms render time per frame, rendering %.0f%% of host time (%u threads, last frame %u planes)",
+					perf_frames / wall, 1000.0 * perf_render_s / perf_frames, 100.0 * perf_render_s / wall, num_threads, stat_planes);
+				perf_frames = 0;
+				perf_render_s = 0;
+				perf_start = t1;
+			}
+		}
+		if (renders <= 3 || (debug_log && renders % 300 == 0)) {
 			LOG_MSG("PowerVR: render #%u obj=%08x page=%08x tlb=%08x,%08x (%uKB) sof=%08x stride=%u pack=%x prec=%08x cam=%04x fog=%u fogcol=%08x xclip=%08x",
 				renders, regs[PCX_OBJECT_OFFSET], regs[PCX_PAGE_CTRL], regs[PCX_TLB], regs[PCX_TLB + 1], (1u << tlb_shift) >> 10,
 				regs[PCX_SOFADDR], regs[PCX_LSTRIDE], regs[PCX_PACKMODE], regs[PCX_PREC_BASE],
