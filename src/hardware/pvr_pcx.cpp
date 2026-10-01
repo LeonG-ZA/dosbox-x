@@ -69,10 +69,12 @@
 #include <algorithm>
 #include <assert.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <vector>
+#include <string>
 #include <atomic>
 #include <thread>
 #if defined(_MSC_VER)
@@ -339,17 +341,34 @@ public:
 		else PIC_DeActivateIRQ((unsigned int)irq);
 	}
 
-	unsigned trace_count = 0;
-	bool Trace() {
-		if (!debug_log || trace_count >= 4000) return false;
-		if (++trace_count == 4000) LOG_MSG("PowerVR: trace limit reached, further register accesses not logged");
-		return true;
+	/* powervr_debug register/config trace. Lines that repeat one of the last few lines
+	 * (polling loops) are counted instead of logged. */
+	unsigned trace_count = 0, trace_repeats = 0;
+	std::string trace_recent[4];
+
+	void TraceMsg(const char *fmt, ...) {
+		if (!debug_log || trace_count >= 20000) return;
+		char buf[160];
+		va_list ap;
+		va_start(ap, fmt);
+		vsnprintf(buf, sizeof(buf), fmt, ap);
+		va_end(ap);
+		for (const std::string &r : trace_recent)
+			if (r == buf) { trace_repeats++; return; }
+		if (trace_repeats) {
+			LOG_MSG("PowerVR: (previous lines repeated, %u more accesses)", trace_repeats);
+			trace_repeats = 0;
+		}
+		for (int i = 3; i > 0; i--) trace_recent[i] = trace_recent[i - 1];
+		trace_recent[0] = buf;
+		LOG_MSG("%s", buf);
+		if (++trace_count == 20000) LOG_MSG("PowerVR: trace limit reached, further accesses not logged");
 	}
 
 	uint32_t ReadReg(uint32_t idx) {
 		idx &= PCX_NUM_REGS - 1;
-		if (idx < PCX_FOG_TABLE && idx != PCX_INTSTATUS && Trace())
-			LOG_MSG("PowerVR: read  reg %03x = %08x", idx * 4, regs[idx]);
+		if (idx < PCX_FOG_TABLE && idx != PCX_INTSTATUS)
+			TraceMsg("PowerVR: read  reg %03x = %08x", idx * 4, regs[idx]);
 		if (idx == PCX_INTSTATUS) {
 			/* reading acknowledges the interrupt [DOS32] isr.asm */
 			const uint32_t v = regs[PCX_INTSTATUS];
@@ -362,8 +381,8 @@ public:
 
 	void WriteReg(uint32_t idx, uint32_t val) {
 		idx &= PCX_NUM_REGS - 1;
-		if ((idx < PCX_FOG_TABLE || (idx >= PCX_TLB && idx < PCX_TLB + 4)) && Trace())
-			LOG_MSG("PowerVR: write reg %03x = %08x", idx * 4, val);
+		if (idx < PCX_FOG_TABLE || (idx >= PCX_TLB && idx < PCX_TLB + 4))
+			TraceMsg("PowerVR: write reg %03x = %08x", idx * 4, val);
 		switch (idx) {
 			case PCX_ID:
 			case PCX_REVISION:
@@ -1635,8 +1654,8 @@ class PCI_PowerVRDevice : public PCI_Device {
 public:
 	uint32_t config_read(uint8_t regnum, Bitu iolen) override {
 		const uint32_t v = PCI_Device::config_read(regnum, iolen);
-		if (pvr && pvr->Trace())
-			LOG_MSG("PowerVR: PCI config read  %02x len %u = %08x", regnum, (unsigned)iolen, v);
+		if (pvr && iolen != 1)
+			pvr->TraceMsg("PowerVR: PCI config read  %02x len %u = %08x", regnum, (unsigned)iolen, v);
 		return v;
 	}
 
@@ -1661,8 +1680,8 @@ public:
 	}
 
 	void config_write(uint8_t regnum, Bitu iolen, uint32_t value) override {
-		if (pvr && pvr->Trace())
-			LOG_MSG("PowerVR: PCI config write %02x len %u = %08x", regnum, (unsigned)iolen, value);
+		if (pvr && iolen != 1)
+			pvr->TraceMsg("PowerVR: PCI config write %02x len %u = %08x", regnum, (unsigned)iolen, value);
 		if (iolen == 1) {
 			const unsigned char mask = config_writemask[regnum];
 			config[regnum] = (unsigned char)((config[regnum] & ~mask) | (value & mask));
