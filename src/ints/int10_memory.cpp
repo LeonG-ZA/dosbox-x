@@ -25,6 +25,7 @@
 #include "int10.h"
 #include "callback.h"
 #include "jfont.h"
+#include "verite.h"
 
 bool int10_vga_bios_vector = true;
 bool rom_bios_8x8_cga_font = true;
@@ -409,9 +410,12 @@ void INT10_SetupRomMemory(void) {
 
         // and then other data follows
 		int10.rom.used=0x100;
+
+		/* Rendition Verite: PCI data structure and vital product data (board resources) */
+		if (IS_VGA_ARCH && svgaCard == SVGA_Verite) VERITE_SetupRom(rom_base, int10.rom.used);
 	}
 	
-	if (IS_VGA_ARCH && (svgaCard==SVGA_S3Trio || svgaCard==SVGA_DOSBoxIG)) INT10_SetupVESA();
+	if (IS_VGA_ARCH && (svgaCard==SVGA_S3Trio || svgaCard==SVGA_DOSBoxIG || svgaCard==SVGA_Verite)) INT10_SetupVESA();
 	
 	if (VGA_BIOS_dont_duplicate_CGA_first_half) {
 		int10.rom.font_8_first=RealMake(0xF000,0xFA6E); /* why duplicate data? use the copy in the ROM BIOS */

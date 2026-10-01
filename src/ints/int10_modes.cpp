@@ -39,6 +39,7 @@
 
 #define DOSBOX_INCLUDE
 #include "iglib.h"
+#include "verite.h"
 
 void dosbox_integration_trigger_write_direct32(const uint32_t reg,const uint32_t val);
 bool dosbox_int_push_save_state(void);
@@ -1461,6 +1462,11 @@ bool INT10_SetVideoMode(uint16_t mode) {
 
 	if (IS_VGA_ARCH && svgaCard == SVGA_None && mode > 0x13) return false; /* Standard VGA does not have anything above 0x13 */
 
+	if (IS_VGA_ARCH && svgaCard == SVGA_Verite) {
+		/* Rendition Verite: leave native mode before setting any mode */
+		VERITE_BeginSetMode();
+	}
+
 	if (IS_VGA_ARCH && svgaCard == SVGA_DOSBoxIG) {
 		/* switch off Integration Graphics */
 		dosbox_int_push_save_state();
@@ -2610,6 +2616,10 @@ dac_text16:
 	// Enable screen memory access
 	IO_Write(0x3c4,1); IO_Write(0x3c5,seq_data[1] & ~0x20);
 	//LOG_MSG("setmode end");
+
+	/* Rendition Verite: like the Rendition BIOS, VESA modes use the native CRTC */
+	if (svgaCard == SVGA_Verite)
+		VERITE_FinishSetMode(CurMode,clearmem);
 
 	if (en_int33) INT10_SetCurMode();
 

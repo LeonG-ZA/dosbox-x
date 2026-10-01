@@ -1,0 +1,295 @@
+# Rendition Vérité V1000 emulation
+
+Sources: `src/hardware/verite_core.cpp`/`.h` (RISC, pixel engine, host interface; no
+DOSBox-X dependencies) and `src/hardware/vga_verite.cpp` (board: PCI, display, RAMDAC,
+PLL, VESA hooks, scheduling). Config: `machine=svga_verite` plus the `[verite]` section.
+Host-side test: `tests/verite/build.bat` (MSVC) or `tests/verite/run.sh` (gcc).
+
+## Approach: low-level emulation of the RISC
+
+The original brief planned high-level emulation: accept the uploaded microcode without
+running it, and reimplement each recognised command. That premise assumed there was no
+usable chip documentation. That turned out to be wrong:
+
+- The **Rendition V2200 Technical Specification** (1159-001 RevB 1/98, 69 pages,
+  "including RISC programming") documents the whole RISC instruction set, the register
+  file, the pixel engine registers and the host I/O registers. It also describes a
+  **V1000 compatibility mode**: the `step` / `draw` / `rdraw` instructions that V1000
+  microcode uses.
+- The V1000 2D microcode shipped with the X.org rendition driver (`v10002d.uc`) uses 79
+  distinct opcodes, all documented. It uses none of the V2x00-only triangle or fill
+  engine instructions.
+- Host drivers control the RISC by forcing single instructions into it through the
+  Debug, StateIndex and StateData registers (X.org `v1krisc.c`), so even HLE would need
+  a RISC interpreter.
+- `.UC` microcode files are big-endian ELF executables with full symbol tables, which
+  makes the microcode easy to read when debugging.
+
+The emulation therefore runs whatever microcode the guest uploads, instruction by
+instruction. The project owner chose "LLE now, HLE fast paths later only if profiling
+needs them".
+
+Nothing closed-source is used at runtime: the microcode comes from the guest's own driver
+or game, and DOSBox-X ships none. Rendering is CPU-side software, as for the S3D and
+PowerVR work.
+
+## What is emulated
+
+- **PCI device** `1163:0001` (V1000), VGA class. BAR0 is the 16MB local memory window and
+  BAR1 is 256 bytes of I/O. Both can be relocated by the guest. VGA ports `3DEh`/`3DFh`
+  return the memory and I/O bases, as on the real chip.
+- **Host interface**:
+  - the input and output FIFOs with their four byte-swap ports;
+  - FIFOInFree and FIFOOutValid;
+  - Comm, MemEndian, Intr/IntrEn, Debug (soft reset, hold, single step) and Status;
+  - StateIndex/StateData (decode IR/PC/S1 read back, forced instruction write);
+  - PCI bus master DMA command lists;
+  - the Mode register (VGA/native, VESA window, DMA enable) and BankSelect.
+- **RISC**:
+  - every instruction in [SPEC] tables 2.3–2.6, 2.8 and 2.9: scalar, vector and
+    vector-scalar ALU ops, multiplies, f2i, clip, seed/seedsr, sort, loads and stores
+    (including the sy/scr/scb byte scatters), branches and jumps with delay slots;
+  - the special registers: FIFO, swfifo, npfifo, seed, scale, seg (indirect register
+    access), flag, clip, timer and riscintr;
+  - the control registers and pixel engine state mapped at `FFE00400h`+.
+- **Pixel engine** (V1000 compatibility mode):
+  - all spr registers and bit-field sprs;
+  - step/stepv for X, Y, Z, U, V, Q, R, G, B, A, I, F and Cnt;
+  - parallel draws (drawp/rdrawp/drawpxy/rdrawpxy) with ROPs, plane mask, patterns,
+    chroma key, scissor, and source blits in both directions;
+  - parameterized draws (draw1–5/rdraw1–5) with DrawCtl parameter pairs;
+  - textures in every source format (including 4-bit indexed through Tex4Pal and YUV),
+    point and bilinear sampling, wrap and clamp, and perspective correction through Q;
+  - decal and modulate, fog, alpha test, Z buffer (all compare modes), blending,
+    YUV→RGB, dithering, and pick.
+- **Display**:
+  - the native CRTC: timing, frame base latched at vertical sync, StrideOffset, line
+    doubling, CRTCStatus/CRTCTest scan position, and the FrameDisplayed/FrameSwitched
+    flags;
+  - the V1000's external Bt485-compatible RAMDAC: palette through DOSBox-X's DAC, 6/8-bit
+    width, and the 64×64 or 32×32 hardware cursor;
+  - the external pixel PLL, programmed serially through I/O `C0h`.
+  - Native mode is drawn through a small generic `vga.native` override in `vga_draw.cpp`
+    that mirrors the existing DOSBox-IG hooks.
+- **VESA BIOS**: as on the real Rendition BIOS, VESA modes put the chip into native mode:
+  - 8/15/16/32bpp, with MemEndian set so the frame buffer looks linear to x86 code;
+  - LFB at BAR0, the 64KB window through BankSelect;
+  - VBE 4F05/4F06/4F07 and the protected-mode window function.
+  - Standard VGA modes 00h–13h use DOSBox-X's VGA emulation.
+- **Rendition BIOS extensions** (INT 10h AH=15h), the vital product data in the VGA ROM
+  and VBE mode 7Fh. Speedy3D games need these to find and start the board (see below).
+
+## Behaviour [SPEC] leaves open, and what is assumed
+
+Each assumption was checked against the X.org V1000 microcode where it exercises the
+feature.
+
+- `getpc`, `jmpl`, `rjmpl` and `jmprl` link to their own address + 8. The X.org
+  context-switch monitor's dispatch table only works this way.
+- The seed ROM returns `floor(2^62 / m)` for the normalised operand. The 2D microcode's
+  line setup refines it with one Newton step in 0.24 fixed point, which only converges
+  with this scaling. It is computed exactly rather than from a 13-bit ROM index.
+- `draw`/`drawp` consume Cnt for the pixels drawn; `rdraw`/`rdrawp` draw Cnt pixels and
+  leave Cnt at 0. Pixels taken from XShadow advance it one pixel in XDir.
+- Parallel draws walk the source one pixel per destination pixel in XDir. The dU value
+  the microcode loads (0 or `FFF80000h`) is not used.
+- DrawCtl pair 2 values 0–7 are not listed in [SPEC] table 2.9c. They are assumed equal
+  to pair 3/4 values 0–7, and their use is logged.
+- Local memory is stored as host-endian 32-bit words. The RISC is big-endian, and
+  MemEndian swaps host accesses:
+  - 0 = none (host pointers are mapped directly);
+  - 1 = bytes;
+  - 2 = bytes within halfwords;
+  - 3 = halfwords.
+  X.org's per-depth MemEndian choices (8bpp → 1, 16bpp → 3, 32bpp → 0) confirm that
+  pixels sit at big-endian RISC byte addresses.
+- The pixel engine is synchronous: PixelBusy reads 0. The icache and line buffer are not
+  emulated, so memory is always coherent.
+- The RISC runs `verite_risc_mhz` (default 25) cycles per emulated millisecond. It also
+  runs immediately when the host polls FIFOInFree/FIFOOutValid/Debug while waiting for
+  it.
+- Bt485 cursor modes: 1 = three colour, 2 = two colour with highlight (11 = invert),
+  3 = X Window. The cursor's screen position is (CX−64, CY−64), as in X.org
+  `verite_movecursor`.
+- Direct colour modes are always displayed without the palette, even after AX=1587h
+  BX=2 clears the Bt485 bypass bit (see below).
+
+## Rendition BIOS interface
+
+Rendition boards shipped a VGA BIOS with extra INT 10h functions. DOS games built on
+Speedy3D call them to find the board and to start their microcode. Boards without the
+functions in ROM were updated with Rendition's `PHX2105.COM` TSR. DOSBox-X implements
+the functions itself in `VERITE_BiosExtension()`, and no Rendition code is used at
+runtime.
+
+The behaviour below was worked out by black-box observation only. The TSR and vQuake
+were run in DOSBox-X with an INT 10h logger (`INTLOG`, which records registers on entry
+and exit) and the emulator's own I/O and memory trace (`verite_trace`). Every function
+returns AX=0015h on success.
+
+| AX | Function |
+|---|---|
+| 1580h | BX = 0084h (meaning unknown; Speedy3D only checks for success) |
+| 1582h | prepare for a microcode load (see below) |
+| 1583h | start the RISC at CX: hold it, force a `jmp`, clear Intr, release it. Returns BX=0064h, DI=0200h |
+| 1584h | release the RISC from hold |
+| 1587h | RAMDAC direct colour setup: BX=2 clears Bt485 CR1 bit 4, otherwise sets it |
+| 158Dh | far pointer to the vital product data in DX:CX (segment DX, offset CX) |
+
+**1582h** sets VESA mode 101h (640×480×8). It then:
+- soft-resets the RISC and leaves it held;
+- sets DRAM control to `140000h` and clears all interrupts;
+- turns the display off (CRTCCtl video and sync enables);
+- sets Mode to VESA with DMA enabled, LowWaterMark 3, MemEndian 0 and BankSelect 0;
+- stores a palette loader at local address 0.
+
+Speedy3D's microcode calls the loader through a pointer at local `F360h`, which is 0 in
+cleared memory. The loader takes:
+- a FIFO word holding `(first index << 16) | count`;
+- then `count` words of `00RRGGBB`.
+
+It writes them to the Bt485 at `FFE00580h`/`FFE00588h`, returns through `ra`, and uses
+registers %160–%165. DOSBox-X's loader is its own 18-word implementation of that
+interface. Without it, vQuake's microcode jumps into data at address 0 and draws nothing.
+
+**Vital product data**: `VERITE_SetupRom()` adds a PCI data structure (`PCIR`, pointed
+to from ROM offset 18h) to the VGA BIOS ROM. Speedy3D checks its class byte (`PCIR`+0Dh
+= 3). The ROM also holds a VPD area in PCI resource-tag format:
+- an `82h` identifier string, "Rendition Reference Board";
+- a `90h` read-only area with PN "1000A", LL 00, ZC and ZR;
+- the `79h` end tag.
+
+The `ZC` keyword is what Speedy3D reads:
+- the I/O base >> 8;
+- the memory base >> 24;
+- the IRQ;
+- the memory size in 64KB units (0 = default 4MB);
+- then 0020h and zeros.
+
+The VPD is rebuilt whenever the guest moves a BAR.
+
+**VBE mode 7Fh**: Speedy3D sets mode 7Fh around its own mode sets. The Rendition BIOS
+only touches scratch registers for it, and DOSBox-X accepts it as a no-op.
+
+**Native mode timing**: VESA modes use the same CRTC values as the Rendition BIOS.
+Timings follow the VESA standards. Modes up to 400 pixels wide are line-doubled at half
+the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCHorz
+`50427h` and CRTCVert `3A3F98Fh`, identical to the TSR.
+
+## Testing done
+
+- `tests/verite` part 1: hand-assembled RISC programs check the following:
+  - ALU ops and delay slots;
+  - vector ops on constant register pairs;
+  - multiplies, getpc/jmpl links and jmprl;
+  - big-endian loads and stores and host MemEndian views;
+  - FIFO stall and resume, and the output FIFO;
+  - the seed reciprocal used by line setup;
+  - f2i.
+- `tests/verite` part 2 runs the X.org V1000 2D microcode through the host interface
+  exactly as the X.org driver does:
+  - soft reset, forced steps, the context-switch monitor at `800h` reaching its wait
+    loop, ELF upload with MemEndian byte swap, and SETUP;
+  - solid fill with copy and XOR ROPs;
+  - screen-to-screen blit, plain and overlapping (right-to-left, bottom-up);
+  - solid line, and GET_PIXEL sync.
+  48 checks pass. The frame buffer is also written to `verite_2d.ppm`.
+- In DOSBox-X with `machine=svga_verite`:
+  - PCI detection and VGA text mode work.
+  - VESA mode 111h switches to native 640×480×16 at 60Hz, and the bank window draws.
+  - A test program uploads RISC code through the VESA window, starts it with forced
+    steps through the I/O BAR, and the RISC draws a rectangle with the pixel engine on
+    the native display.
+- **vQuake 1.08b1** (Speedy3D, with shareware Quake 1.06 data) runs on DOSBox-X's own
+  BIOS with no TSR loaded:
+  - E1M1 renders correctly in 320×200×16 (line-doubled native mode) with textures,
+    perspective, lighting and the status bar;
+  - `timedemo demo1` gives 969 frames in 25.9 s, 37.4 fps at `cycles=max` with the
+    default 25 MHz RISC. Running under Rendition's own TSR gave 37.7 fps;
+  - DMA command lists, the input FIFO, the parameterized draws and the palette loader
+    are all in use.
+
+## Microcode found in released Rendition software (brief section 6)
+
+Source: the VOGONS Drivers "Rendition - Game Patch Compilation"
+(`game_updates_compilation.7z`, fileid 168). The file name, size and first 64 bits of
+SHA-256 are listed for each microcode.
+
+| Microcode | Used by | Size | SHA-256 (64 bits) | Notes |
+|---|---|---|---|---|
+| Speedy3D, 1996-11-05 | Tomb Raider (Rendition), Whiplash, an IndyCar II replacement `spd3d.uc` | 67280 | `e50a13579db9e81a` | stripped, loads at `1000h` |
+| Speedy3D (vQuake), 1996-11-07 | vQuake 1.08b1 | 65176 | `a7151eefd5740389` | stripped; vQuake's `spd3d.uc2` "for V2x00" is byte-identical |
+| Speedy3D V2x00 beta, 1997-08 | IndyCar II V2000 patch | 72280 | `c52e32e352ac725f` | symbols present; uses V2x00-only `tri`, `fill`, `cbltf`, `sort` |
+| RRedline 3D, 1997-10 | V1000 reference driver beta 5 `special\v10003d.uc` (also in VHexen II) | 93132 | `602cdb202ebffb3d` | stripped, loads at `8000h` |
+| RRedline 3D | V1000 reference driver 2.1b2 `v10003d.uc` | 93132 | `7f031521373e86a3` | same layout as beta 5; 164 code words differ |
+| OpenGL | V1000 reference driver 2.1b2 `v1000gl.uc` | 93132 | `1ecff4afb97fb3e8` | variant of the 2.1b2 3D microcode: 190 code and 49 data words differ |
+| OpenGL, 1998-05-23 | miroCRYSTAL VRX driver 2.2 (1998-11-19) `V1000GL.UC` | 93132 | `48a60dc6d23ad554` | rebuild: same section layout, but 5274 code words differ from the 2.1b2 file |
+| 2D | V1000 reference driver 2.1b2 `v10002d.uc` | 26253 | `0768ffc017197dc9` | symbols present |
+| 2D (X.org) | XFree86/X.org rendition driver | 26253 | `f0a3514ae9c9a3d8` | same code and data as the 2.1b2 file; only the unloaded `.reginfo`/`.bss` headers differ |
+
+The miroCRYSTAL VRX 2.2 package (The Retro Web, `w9x-vrx220.zip`) is the 2.1b2 reference
+driver with newer RRedline and OpenGL parts:
+- **Identical to 2.1b2:** `V10002D.UC`, `V10003D.UC`, `VERITE.DRV`, `V100032.DLL`,
+  `V1000.DLL` and `V1000.VXD`.
+- **Newer:** `REDLINE.DLL` and `VERITE.DLL` (1998-09), an `OPENGL32.DLL` (instead of
+  `veritegl.dll`) and the OpenGL microcode above.
+- **Device match:** its INF matches plain `PCI\VEN_1163&DEV_0001` and needs no
+  subsystem ID.
+- **DOS TSR:** `VROM.COM` is byte-identical to Rendition's `PHX2105.COM` BIOS TSR. The
+  readme recommends it for display problems under DOS.
+
+The new OpenGL microcode uses the same 85 opcodes as the 3D microcode, and the core
+implements all of them.
+
+So far the DOS side has two distinct V1000 Speedy3D microcodes:
+- a shared one used by Tomb Raider (Core Design), Whiplash (Gremlin), and the IndyCar II
+  replacement of unknown origin;
+- vQuake's own build.
+
+The `SPD3D.UC` files for Scorched Planet, IndyCar II (as shipped) and Rebel Moon are
+still needed to complete the comparison. Speedy3D loads `SPD3D.UC` from the current
+directory unless the `SPEEDY3D` environment variable names another file (IndyCar II V2000
+readme).
+
+Every V1000 microcode above uses only instructions the core implements: no
+triangle/fill-engine opcodes and no undefined ones. All of them rely heavily on the
+parameterized `draw1`–`draw5`/`rdraw1`–`rdraw5` paths and on `step q` (perspective and
+reciprocals). vQuake exercises these paths and renders correctly.
+
+**Direct3D and DirectDraw (brief section 4).** The Windows 95 reference driver 2.1b2
+installs three separate microcodes:
+- `v10002d.uc` (2D);
+- `v10003d.uc` (3D);
+- `v1000gl.uc` (OpenGL).
+
+The INF points RRedline at the 3D file with the registry value
+`HKLM\SOFTWARE\RRedline\v1000\microcode`. So a single shared microcode is not a safe
+assumption.
+
+It is still open which file the DirectDraw/Direct3D HAL (`v100032.dll`) loads. That has
+to be observed at runtime under Windows 9x. The emulation does not depend on the answer,
+because it runs whatever microcode is uploaded.
+
+## Not yet verified (needs real software)
+
+- 3D microcode beyond vQuake: RRedline (`v10003d.uc`), the other Speedy3D builds and the
+  V2x00-only instructions. Fog and blending modes that vQuake doesn't use follow [SPEC]
+  but are unverified.
+- Windows 9x V1000 drivers: DirectDraw and RRedline (brief phases 1–2).
+- The DOS games (brief phase 3): Scorched Planet, IndyCar Racing II, Rebel Moon.
+- Exact pixel engine rounding (bilinear filter, dithering, fog) has no hardware reference
+  and aims at "visually correct".
+- Bt485 cursor mode encodings have not been checked against a real driver.
+
+## Next steps
+
+1. Windows V1000 driver package and a Windows 95/98 image: boot with
+   `machine=svga_verite`, install the driver, and check the accelerated desktop and the
+   hardware cursor. Record which `.UC` the DirectDraw/Direct3D HAL loads (brief section 4).
+2. Extract the `.UC` files from the three DOS games and hash/diff them against each other
+   and against the Windows ones with `tools/veritedis.py --info/--census` (brief
+   section 6).
+3. Run the games; fix the 3D paths with the microcode symbols and `verite_debug` traces.
+   Any further BIOS functions they call are logged as "unknown Rendition BIOS function".
+4. Profile; add HLE fast paths only where needed, with LLE as the fallback. vQuake runs
+   at full speed under LLE, so none are needed yet.

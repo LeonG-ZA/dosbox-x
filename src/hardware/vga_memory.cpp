@@ -35,6 +35,7 @@
 #include "pc98_gdc.h"
 #include "zipfile.h"
 #include "src/ints/int10.h"
+#include "verite.h"
 
 unsigned char pc98_pegc_mmio[0x200] = {0}; /* PC-98 memory-mapped PEGC registers at E0000h */
 uint32_t pc98_pegc_banks[2] = {0x0000,0x0000}; /* bank switching offsets */
@@ -2772,7 +2773,15 @@ void VGA_SetupHandlers(void) {
 	if ((dos.loaded_codepage == 936 || dos.loaded_codepage == 950 || dos.loaded_codepage == 951) && RunningProgram.size() > 3 && !strncmp(RunningProgram.c_str(), "ET", 2)) enveten = true;
 	runeten = !vga_fill_inactive_ram && enveten && (dos.loaded_codepage == 936 || dos.loaded_codepage == 950 || dos.loaded_codepage == 951) && ((RunningProgram.size() > 3 && !strncmp(RunningProgram.c_str(), "ET", 2)) || !TTF_using());
 
-	if (vga.dosboxig.force_A0000) {
+	/* Rendition Verite native mode: the VESA window shows local memory at BankSelect */
+	if (svgaCard == SVGA_Verite && vga.native.active) {
+		PageHandler *wh = VERITE_WindowHandler();
+		vgapages.base = VGA_PAGE_A0;
+		vgapages.mask = 0xffff;
+		MEM_SetPageHandler( VGA_PAGE_A0, 16, wh ? wh : (PageHandler*)&vgaph.empty );
+		MEM_SetPageHandler( VGA_PAGE_B0, 16, &vgaph.empty );
+	}
+	else if (vga.dosboxig.force_A0000) {
 		vgapages.base = VGA_PAGE_A0;
 		vgapages.mask = 0xffff & vga.mem.memmask;
 		MEM_SetPageHandler( VGA_PAGE_A0, 16, newHandler );

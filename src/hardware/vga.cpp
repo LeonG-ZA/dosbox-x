@@ -157,6 +157,7 @@
 
 #define DOSBOX_INCLUDE
 #include "iglib.h"
+#include "verite.h"
 
 void dosbox_integration_trigger_write_direct32(const uint32_t reg,const uint32_t val);
 bool dosbox_int_push_save_state(void);
@@ -365,7 +366,9 @@ enum VGAModes VGA_DOSBoxIG_FmtToVGA(void) {
 }
 
 void VGA_DetermineMode(void) {
-	if (vga.dosboxig.svga)
+	if (vga.native.active)
+		VGA_SetMode(M_LIN32); /* the card's CRTC draws 32bpp lines (vga.native.draw_line) */
+	else if (vga.dosboxig.svga)
 		VGA_SetMode(VGA_DOSBoxIG_FmtToVGA());
 	else if (svga.determine_mode)
 		svga.determine_mode();
@@ -2010,6 +2013,9 @@ void SVGA_Setup_Driver(void) {
 			break;
 		case SVGA_DOSBoxIG:
 			SVGA_Setup_DOSBoxIG();
+			break;
+		case SVGA_Verite:
+			SVGA_Setup_Verite();
 			break;
 		default:
 			if (IS_JEGA_ARCH) SVGA_Setup_JEGA();

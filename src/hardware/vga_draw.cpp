@@ -69,6 +69,7 @@ void OUTPUT_Metal_CheckSourceResolution();
 
 /* do not issue CPU-side I/O here -- this code emulates functions that the GDC itself carries out, not on the CPU */
 #include "cpu_io_is_forbidden.h"
+#include "verite.h"
 
 static constexpr unsigned int MCH_RAW_SNAPSHOT = 0xFFFF;
 
@@ -3954,7 +3955,7 @@ again:
         }
 
         VGA_DAC_DeferredUpdateColorPalette();
-        if (GCC_UNLIKELY(vga.attr.disabled && !vga.dosboxig.svga)) {
+        if (GCC_UNLIKELY(vga.attr.disabled && !vga.dosboxig.svga && !vga.native.active)) {
             switch(machine) {
                 case MCH_PCJR:
                     // Displays the border color when screen is disabled
@@ -4090,7 +4091,7 @@ again:
 
     if (!skiprender) {
         vga.draw.lines_done++;
-        if (vga.draw.split_line==vga.draw.lines_done && machine != MCH_PC98 && !vga.dosboxig.svga) VGA_ProcessSplit();
+        if (vga.draw.split_line==vga.draw.lines_done && machine != MCH_PC98 && !vga.dosboxig.svga && !vga.native.active) VGA_ProcessSplit();
     }
 
     if (mcga_double_scan) {
@@ -4150,7 +4151,7 @@ static void VGA_DrawEGASingleLine(Bitu /*blah*/) {
         vga.draw.render_step = 0;
 
     if (!skiprender) {
-        if (GCC_UNLIKELY(vga.attr.disabled && !vga.dosboxig.svga)) {
+        if (GCC_UNLIKELY(vga.attr.disabled && !vga.dosboxig.svga && !vga.native.active)) {
             memset(TempLine, 0, TempLineSize);
             RENDER_DrawLine(TempLine);
         } else {
@@ -4192,7 +4193,7 @@ static void VGA_DrawEGASingleLine(Bitu /*blah*/) {
 
     if (!skiprender) {
         vga.draw.lines_done++;
-        if (vga.draw.split_line==vga.draw.lines_done && machine != MCH_PC98 && !vga.dosboxig.svga) VGA_ProcessSplit();
+        if (vga.draw.split_line==vga.draw.lines_done && machine != MCH_PC98 && !vga.dosboxig.svga && !vga.native.active) VGA_ProcessSplit();
     }
 
     if (vga.draw.lines_done < vga.draw.lines_total) {
@@ -4337,7 +4338,9 @@ static void VGA_DisplayStartLatch(Bitu /*val*/) {
 static void VGA_PanningLatch(Bitu /*val*/) {
     if (IS_PC98_ARCH) OnDemandCompleteFrame();
 
-    if (vga.dosboxig.svga)
+    if (vga.native.active)
+        vga.draw.panning = 0;
+    else if (vga.dosboxig.svga)
         vga.draw.panning = vga.dosboxig.hpel;
     else
         vga.draw.panning = vga.config.pel_panning;
@@ -6133,6 +6136,9 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 	/* S3 ViRGE: vertical sync interrupt status (MM8504 bit 0), polled by S3D Toolkit page flips */
 	S3_ViRGE_VSync();
 
+	/* Rendition Verite: frame base latch, vertical retrace interrupt */
+	if (svgaCard == SVGA_Verite) VERITE_VSync();
+
 	dbg_event_maxscan = false;
 	dbg_event_scanstep = false;
 	dbg_event_hretrace = false;
@@ -6462,7 +6468,11 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 
 	float draw_skip = 0.0;
 
-	if (vga.dosboxig.svga) {
+	if (vga.native.active) {
+		vga.draw.address = vga.native.start;
+		vga.draw.address_line = 0;
+	}
+	else if (vga.dosboxig.svga) {
 		vga.draw.address = vga.dosboxig.display_offset;
 		vga.draw.linear_mask = vga.mem.memmask;
 		vga.draw.address_line = 0;
@@ -6629,7 +6639,7 @@ static void VGA_VerticalTimer(Bitu /*val*/) {
 		}
 
 		/* do VGA split now if line compare <= 0. NTS: vga.draw.split_line is defined as Bitu (unsigned integer) so we need the typecast. */
-		if (GCC_UNLIKELY((Bits)vga.draw.split_line <= 0) && machine != MCH_PC98 && !vga.dosboxig.svga) {
+		if (GCC_UNLIKELY((Bits)vga.draw.split_line <= 0) && machine != MCH_PC98 && !vga.dosboxig.svga && !vga.native.active) {
 			VGA_ProcessSplit();
 
 			/* if vblank_skip != 0, line compare can become a negative value! Fixes "Warlock" 1992 demo by Warlock */
@@ -7051,6 +7061,10 @@ void VGA_ResetDebugOverrides(void) {
 }
 
 void VGA_CheckScanLength(void) {
+	if (vga.native.active) {
+		vga.draw.address_add=vga.native.pitch;
+		return;
+	}
 	if (vga.dosboxig.svga) {
 		vga.draw.address_add=vga.dosboxig.bytes_per_scanline;
 		return;
@@ -7233,7 +7247,7 @@ static bool isSVGAMode(void) {
 			return true;
 	}
 
-	if (vga.dosboxig.svga)
+	if (vga.dosboxig.svga || vga.native.active)
 		return true;
 
 	return false;
@@ -7499,7 +7513,18 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 		if ((svgaCard == SVGA_TsengET3K || svgaCard == SVGA_TsengET4K) && et4k_highcolor_half_pixel_rate())
 			clock /= 2;
 
-		if (vga.dosboxig.svga && vga.dosboxig.width != 0 && vga.dosboxig.height != 0) {
+		if (vga.native.active) {
+			/* the card's own CRTC (e.g. Rendition Verite native mode) */
+			/* vertical timing is in output scanlines; line doubling repeats memory lines */
+			htotal = vga.native.htotal; hdend = vga.native.width;
+			hbstart = hdend; hbend = htotal;
+			hrstart = vga.native.hsync_start; hrend = vga.native.hsync_end;
+			vtotal = vga.native.vtotal; vdend = vga.native.height;
+			vbstart = vdend; vbend = vtotal;
+			vrstart = vga.native.vsync_start; vrend = vga.native.vsync_end;
+			oscclock = clock = (Bitu)vga.native.clock;
+		}
+		else if (vga.dosboxig.svga && vga.dosboxig.width != 0 && vga.dosboxig.height != 0) {
 			htotal = hdend = hbend = hbstart = hrstart = hrend = vga.dosboxig.width;
 			vtotal = vdend = vbend = vbstart = vrstart = vrend = vga.dosboxig.height * (1 + vga.dosboxig.vscale);
 			clock = oscclock;
@@ -7788,7 +7813,19 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 	Bitu width=hdend;
 	Bitu height=vdend;
 
-	if (vga.dosboxig.svga) {
+	if (vga.native.active) {
+		vga.draw.address_add = vga.native.pitch;
+		vga.draw.address_line_total = vga.native.line_double ? 2 : 1;
+		vga.draw.render_max = 1;
+		vga.draw.doublescan_effect = vga.draw.doublescan_set;
+		if (vga.draw.doublescan_effect && !RENDER_IsScalerCompatibleWithDoublescan())
+			vga.draw.doublescan_effect = false;
+		if ((!vga.draw.doublescan_effect) && (vga.draw.address_line_total & 1) == 0)
+			height /= 2;
+		else
+			vga.draw.doublescan_effect = true;
+	}
+	else if (vga.dosboxig.svga) {
 		vga.draw.address_add = vga.dosboxig.bytes_per_scanline;
 		vga.draw.address_line_total = 1 + vga.dosboxig.vscale;
 		vga.draw.render_max = 1;
@@ -7869,7 +7906,7 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 	 * on SVGA hardware. Without this check, those demos will show
 	 * credits that scroll upward to blackness before "popping" back
 	 * onto the screen. */
-	if (vga.dosboxig.svga) {
+	if (vga.dosboxig.svga || vga.native.active) {
 		/* no restrictions */
 	}
 	else if (IS_VGA_ARCH) {
@@ -7888,7 +7925,13 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 		vga.draw.planar_mask = vga.draw.linear_mask >> 1;
 
 	Bitu pix_per_char = 8;
-	if (vga.dosboxig.svga) {
+	if (vga.native.active && vga.native.draw_line != NULL) {
+		pix_per_char = 1;
+		VGA_DrawRawLine = NULL;
+		VGA_DrawLine = vga.native.draw_line;
+		bpp = 32;
+	}
+	else if (vga.dosboxig.svga) {
 		pix_per_char = 1;
 		VGA_DrawRawLine = NULL;//FIXME
 
@@ -8399,7 +8442,10 @@ void VGA_SetupDrawing(Bitu /*val*/) {
 
 	// unless DOSBox IG says otherwise, pixels are always square.
 	// the 16:9 HD VESA modes are impossible to display properly otherwise.
-	if (vga.dosboxig.svga) {
+	if (vga.native.active) {
+		screenratio = 4.0 / 3.0; /* the monitor fills the screen at any resolution */
+	}
+	else if (vga.dosboxig.svga) {
 		screenratio = (double)vga.dosboxig.width / (double)vga.dosboxig.height;
 
 		if (vga.dosboxig.dar_width != 0 || vga.dosboxig.dar_height != 0)

@@ -31,6 +31,7 @@
 #include "setup.h"
 #include "render.h"
 #include "jfont.h"
+#include "verite.h"
 
 Int10Data int10;
 bool blinking=true;
@@ -807,7 +808,7 @@ CX	640x480	800x600	  1024x768/1280x1024
 		}
 		break;
 	case 0x4f:								/* VESA Calls */
-		if ((!IS_VGA_ARCH) || !(svgaCard==SVGA_S3Trio||svgaCard==SVGA_DOSBoxIG))
+		if ((!IS_VGA_ARCH) || !(svgaCard==SVGA_S3Trio||svgaCard==SVGA_DOSBoxIG||svgaCard==SVGA_Verite))
 			break;
 		if (int10.vesa_oldvbe10 && reg_al >= 6) /* Functions 6 and up did not exist until VBE 1.2 (or 1.1?) */
 			break;
@@ -1240,6 +1241,10 @@ CX	640x480	800x600	  1024x768/1280x1024
 			reg_di = 0x0000;
 			SegSet16(es, GetTextSeg());
 		}
+		break;
+	case 0x15:								/* Rendition Verite BIOS extensions */
+		if (svgaCard == SVGA_Verite && VERITE_BiosExtension()) break;
+		LOG(LOG_INT10,LOG_ERROR)("Function %4X not supported",reg_ax);
 		break;
 	case 0xff:
 		if(IS_DOSV && DOSV_CheckCJKVideoMode()) {

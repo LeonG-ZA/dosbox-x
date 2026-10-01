@@ -1291,6 +1291,7 @@ void DOSBOX_RealInit() {
 
     else if (mtype == "fm_towns")      { machine = MCH_VGA; want_fm_towns = true; /*machine = MCH_FM_TOWNS;*/ }
     else if (mtype == "svga_dosbox")   { machine = MCH_VGA; svgaCard = SVGA_DOSBoxIG; int10.vesa_vbe3 = true; } /* special emulator accelerator graphics adapter */
+    else if (mtype == "svga_verite")   { machine = MCH_VGA; svgaCard = SVGA_Verite; } /* Rendition Verite V1000 */
     else if (mtype == "svga_dosbox_vbe2") { machine = MCH_VGA; svgaCard = SVGA_DOSBoxIG; } /* special emulator accelerator graphics adapter */
 
     else E_Exit("DOSBOX-X:Unknown machine type %s",mtype.c_str());
@@ -1569,6 +1570,7 @@ void DOSBOX_SetupConfigSections(void) {
 	"svga_ati_mach64",
 	"svga_dosbox",
 	"svga_dosbox_vbe2",
+	"svga_verite",
 	"fm_towns", // STUB
         nullptr };
 
@@ -3519,6 +3521,26 @@ void DOSBOX_SetupConfigSections(void) {
 	Pbool = secprop->Add_bool("splash",Property::Changeable::WhenIdle,true);
 	Pbool->Set_help("Show 3dfx splash screen for Glide emulation (Windows; requires 3dfxSpl2.dll).");
     Pbool->SetBasic(true);
+
+    secprop=control->AddSection_prop("verite",&Null_Init,false); //Rendition Verite V1000 (machine=svga_verite)
+
+    Pint = secprop->Add_int("verite_irq",Property::Changeable::OnlyAtStart,11);
+    Pint->SetMinMax(0,15);
+    Pint->Set_help("IRQ used by the Rendition Verite (machine=svga_verite) for vertical retrace, RISC and DMA interrupts.\n"
+                   "Set to 0 for no interrupt.");
+
+    Pint = secprop->Add_int("verite_risc_mhz",Property::Changeable::OnlyAtStart,25);
+    Pint->SetMinMax(1,1000);
+    Pint->Set_help("Clock rate of the Verite's RISC processor in MHz (how many microcode instructions run per\n"
+                   "millisecond of emulated time when the RISC is busy).");
+
+    Pbool = secprop->Add_bool("verite_debug",Property::Changeable::OnlyAtStart,false);
+    Pbool->Set_help("Log Verite mode changes and RISC statistics.");
+
+    Pint = secprop->Add_int("verite_trace",Property::Changeable::OnlyAtStart,0);
+    Pint->SetMinMax(0,1000000);
+    Pint->Set_help("Log this many host accesses to the Verite (I/O registers and PCI configuration), and as many RISC\n"
+                   "accesses to its control registers, for troubleshooting.");
 
     secprop=control->AddSection_prop("mixer",&Null_Init);
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);

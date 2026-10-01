@@ -403,7 +403,7 @@ bool UnregisterPCIDevice(PCI_Device* device) {
 }
 
 // register PCI device to bus and setup data
-Bits RegisterPCIDevice(PCI_Device* device, Bits bus=-1, Bits slot=-1) {
+Bits RegisterPCIDevice(PCI_Device* device, Bits bus, Bits slot) {
 	if (device == NULL) return -1;
 	if (bus >= PCI_MAX_PCIBUSSES) return -1;
 	if (slot >= PCI_MAX_PCIDEVICES) return -1;
@@ -438,6 +438,11 @@ Bits RegisterPCIDevice(PCI_Device* device, Bits bus=-1, Bits slot=-1) {
 	if (pci_devices[bus][slot] != NULL) E_Exit("PCI interface error: attempted to fill slot already taken");
 	pci_devices[bus][slot]=device;
 	return slot;
+}
+
+bool PCI_IsSlotFree(Bits bus, Bits slot) {
+	if (bus < 0 || bus >= PCI_MAX_PCIBUSSES || slot < 0 || slot >= PCI_MAX_PCIDEVICES) return false;
+	return pci_devices[bus][slot] == NULL;
 }
 
 static void Deinitialize(void) {

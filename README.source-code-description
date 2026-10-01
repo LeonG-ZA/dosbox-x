@@ -261,6 +261,10 @@ src/hardware/vga_seq.cpp    VGA sequencer emulation
 
 src/hardware/vga_tseng.cpp  Tseng ET3000/ET4000 emulation
 
+src/hardware/vga_verite.cpp Rendition Verite V1000 board (PCI, native display, RAMDAC, VESA)
+
+src/hardware/verite_core.cpp Rendition Verite RISC processor, pixel engine and host interface
+
 src/hardware/vga_xga.cpp    VGA XGA emulation
 
 src/hardware/vga_pc98_cg.cpp PC-98 CG (character generator) emulation

@@ -33,6 +33,7 @@
 
 #define DOSBOX_INCLUDE
 #include "iglib.h"
+#include "verite.h"
 
 void dosbox_integration_trigger_write_direct32(const uint32_t reg,const uint32_t val);
 bool dosbox_int_push_save_state(void);
@@ -544,7 +545,7 @@ foundit:
 	}
 
 	if (!int10.vesa_nolfb && !int10.vesa_oldvbe && (modeAttributes&0x80)/*ModeAttributes indicates an LFB*/)
-		var_write(&minfo.PhysBasePtr,S3_LFB_BASE + adj + (hack_lfb_yadjust*(long)host_readw((HostPt)(&minfo.BytesPerScanLine))));
+		var_write(&minfo.PhysBasePtr,(svgaCard == SVGA_Verite ? VERITE_LfbBase() : (uint32_t)S3_LFB_BASE) + adj + (hack_lfb_yadjust*(long)host_readw((HostPt)(&minfo.BytesPerScanLine))));
 
 	MEM_BlockWrite(buf,&minfo,sizeof(MODE_INFO));
 	return VESA_SUCCESS;
@@ -552,6 +553,8 @@ foundit:
 
 
 uint8_t VESA_SetSVGAMode(uint16_t mode) {
+	/* Rendition BIOS: mode 7Fh is accepted and changes nothing (used by Speedy3D) */
+	if (svgaCard == SVGA_Verite && (mode & 0x3FFF) == 0x7F) return VESA_SUCCESS;
 	if (INT10_SetVideoMode(mode)) {
 		int10.vesa_setmode=mode&0x7fff;
 		return VESA_SUCCESS;
@@ -584,7 +587,10 @@ uint8_t VESA_SetCPUWindow(uint8_t window,uint16_t address) {
 	if (CurMode->type == M_LIN4) calcmemsize /= 4u; /* 4bpp planar = 4 bytes per video memory byte */
 
 	if ((!vesa_bank_switch_window_range_check) || (uint32_t)(address)*vga.svga.bank_size<calcmemsize) { /* range check, or silently truncate address depending on dosbox-x.conf setting */
-		if (svgaCard == SVGA_DOSBoxIG) {
+		if (svgaCard == SVGA_Verite) {
+			VERITE_SetBank((uint32_t)address * (uint32_t)vga.svga.bank_size);
+		}
+		else if (svgaCard == SVGA_DOSBoxIG) {
 			dosbox_int_push_save_state();
 			dosbox_integration_trigger_write_direct32(DOSBOX_ID_REG_VGAIG_BANKWINDOW,(uint32_t)address * (uint32_t)vga.svga.bank_size);
 			dosbox_int_pop_save_state();
@@ -600,7 +606,10 @@ uint8_t VESA_SetCPUWindow(uint8_t window,uint16_t address) {
 
 uint8_t VESA_GetCPUWindow(uint8_t window,uint16_t & address) {
 	if (window && !vesa_bank_switch_window_mirror) return VESA_FAIL;
-	if (svgaCard == SVGA_DOSBoxIG) {
+	if (svgaCard == SVGA_Verite) {
+		address=(uint16_t)(VERITE_GetBank() / vga.svga.bank_size);
+	}
+	else if (svgaCard == SVGA_DOSBoxIG) {
 		address=vga.svga.bank_read_full / vga.svga.bank_size;
 	}
 	else {
@@ -662,6 +671,28 @@ uint8_t VESA_ScanLineLength(uint8_t subcall,uint16_t val, uint16_t & bytes,uint1
 	Bitu new_offset = vga.dosboxig.svga ? vga.dosboxig.bytes_per_scanline : vga.config.scan_len;
 	Bitu screen_height = CurMode->sheight;
 	Bitu max_offset;
+
+	if (svgaCard == SVGA_Verite && vga.native.active) {
+		/* Rendition Verite native mode: logical width in bytes, a multiple of 8 */
+		const Bitu bpp = (CurMode->type == M_LIN8) ? 1u : ((CurMode->type == M_LIN32) ? 4u : 2u);
+		const Bitu minb = CurMode->swidth * bpp;
+		Bitu nb = VERITE_GetPitch();
+		switch (subcall) {
+			case 0x00: nb = (Bitu)val * bpp; break;
+			case 0x01: break;
+			case 0x02: nb = val; break;
+			case 0x03: nb = 8192; break;
+			default: return VESA_UNIMPLEMENTED;
+		}
+		nb = (nb + 7u) & ~(Bitu)7u;
+		if (nb < minb) nb = minb;
+		if (nb > 8192) nb = 8192;
+		if (subcall == 0x00 || subcall == 0x02) VERITE_SetPitch((uint32_t)nb);
+		bytes = (uint16_t)nb;
+		pixels = (uint16_t)(nb / bpp);
+		lines = (uint16_t)((vmemsize / nb) > 0xFFFFu ? 0xFFFFu : (vmemsize / nb));
+		return VESA_SUCCESS;
+	}
 
 	/* this special hack is for the Windows 3.1 S3 driver in "640x480 (1MB) 16 million colors" mode which does no scan line or display offset calls at all */
 	if (CurMode->special & _S3_POW2_STRIDE)
@@ -854,6 +885,13 @@ uint8_t VESA_SetDisplayStart(uint16_t x,uint16_t y,bool wait) {
 			wait = int10.vesa_oldvbe;
 	}
 
+	if (svgaCard == SVGA_Verite && vga.native.active) {
+		const uint32_t bpp = (CurMode->type == M_LIN8) ? 1u : ((CurMode->type == M_LIN32) ? 4u : 2u);
+		VERITE_SetDisplayStart(VERITE_GetPitch() * y + x * bpp);
+		if (wait) CALLBACK_RunRealFar(RealSeg(int10.rom.wait_retrace),RealOff(int10.rom.wait_retrace));
+		return VESA_SUCCESS;
+	}
+
 	if (vga.dosboxig.svga) {
 		uint32_t offset = vga.dosboxig.bytes_per_scanline * y;
 		uint8_t hpel = 0;
@@ -957,6 +995,14 @@ uint8_t VESA_GetDisplayStart(uint16_t & x,uint16_t & y) {
 	Bitu pixels_per_offset;
 	Bitu panning_factor = 1;
 
+	if (svgaCard == SVGA_Verite && vga.native.active) {
+		const uint32_t bpp = (CurMode->type == M_LIN8) ? 1u : ((CurMode->type == M_LIN32) ? 4u : 2u);
+		const uint32_t pitch = VERITE_GetPitch(), start = VERITE_GetDisplayStart();
+		x = (uint16_t)(pitch ? (start % pitch) / bpp : 0);
+		y = (uint16_t)(pitch ? start / pitch : 0);
+		return VESA_SUCCESS;
+	}
+
 	if (vga.dosboxig.svga) {
 		if (vga.dosboxig.bytes_per_scanline) {
 			x = vga.dosboxig.display_offset % vga.dosboxig.bytes_per_scanline;
@@ -1049,7 +1095,10 @@ static Bitu VESA_SetWindow(void) {
 }
 
 static Bitu VESA_PMSetWindow(void) {
-	if (svgaCard == SVGA_DOSBoxIG) {
+	if (svgaCard == SVGA_Verite) {
+		VERITE_SetBank((uint32_t)reg_dl * (uint32_t)vga.svga.bank_size);
+	}
+	else if (svgaCard == SVGA_DOSBoxIG) {
 		dosbox_int_push_save_state();
 		dosbox_integration_trigger_write_direct32(DOSBOX_ID_REG_VGAIG_BANKWINDOW,(uint32_t)reg_dl * (uint32_t)vga.svga.bank_size);
 		dosbox_int_pop_save_state();

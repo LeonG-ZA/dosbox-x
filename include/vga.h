@@ -712,6 +712,21 @@ typedef struct VGA_DOSBoxIG {
 	uint32_t		ctlreg = 0; /* raw data written to CTL register */
 } VGA_DOSBoxIG;
 
+/* A card's own (non-VGA) CRTC driving the display, e.g. Rendition Verite native mode.
+ * The card fills this in and calls VGA_DetermineMode() / VGA_StartResize() on changes. */
+typedef struct VGA_NativeCRTC {
+	bool			active = false;
+	unsigned int		width = 640, height = 480;     /* active pixels and output scanlines */
+	unsigned int		htotal = 800, vtotal = 525;    /* pixels / lines including blanking */
+	unsigned int		hsync_start = 656, hsync_end = 752;
+	unsigned int		vsync_start = 490, vsync_end = 492;
+	double			clock = 25175000.0;            /* pixel clock in Hz */
+	bool			line_double = false;          /* each memory line is shown on two scanlines */
+	uint32_t		start = 0;                     /* display start, latched at vertical sync */
+	uint32_t		pitch = 0;                     /* bytes from one scanline to the next */
+	uint8_t*		(*draw_line)(Bitu vidstart, Bitu line) = NULL; /* returns 32bpp pixels */
+} VGA_NativeCRTC;
+
 typedef struct VGA_Type_t {
     VGAModes mode = {};                              /* The mode the vga system is in */
     VGAModes lastmode = {};
@@ -738,6 +753,7 @@ typedef struct VGA_Type_t {
     VGA_Complexity complexity = {};
     VGA_Override overopts = {};
     VGA_DOSBoxIG dosboxig = {};
+    VGA_NativeCRTC native = {};
     unsigned int max_svga_width = 0,max_svga_height = 0;
 } VGA_Type;
 
