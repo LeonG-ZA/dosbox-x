@@ -378,6 +378,16 @@ public:
 		if (idx == PCX_INTSTATUS) {
 			/* reading acknowledges the interrupt [DOS32] isr.asm */
 			const uint32_t v = regs[PCX_INTSTATUS];
+			if (debug_log) {
+				perf_status_reads++;
+				if ((v & INT_END_OF_RENDER) && perf_waiting_ack) {
+					perf_waiting_ack = false;
+					perf_ack_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_render_end).count();
+					perf_acks++;
+					perf_ack_time = std::chrono::steady_clock::now();
+					perf_have_ack = true;
+				}
+			}
 			regs[PCX_INTSTATUS] = 0;
 			UpdateIRQ();
 			return v;
@@ -1441,8 +1451,10 @@ public:
 	}
 
 	std::chrono::steady_clock::time_point perf_start = std::chrono::steady_clock::now();
-	double perf_render_s = 0;
-	unsigned perf_frames = 0;
+	std::chrono::steady_clock::time_point perf_render_end, perf_ack_time;
+	double perf_render_s = 0, perf_ack_s = 0, perf_gap_s = 0;
+	unsigned perf_frames = 0, perf_acks = 0, perf_gaps = 0, perf_status_reads = 0;
+	bool perf_waiting_ack = false, perf_have_ack = false;
 
 	void Render() {
 		renders++;
@@ -1450,8 +1462,15 @@ public:
 		stat_regions = stat_objects = stat_planes = stat_pixels = stat_lit = stat_first_tag = 0;
 		if (debug_log && (renders == 60 || renders == 600)) DumpFrame();
 		const auto t0 = std::chrono::steady_clock::now();
+		if (debug_log && perf_have_ack) {
+			perf_gap_s += std::chrono::duration<double>(t0 - perf_ack_time).count();
+			perf_gaps++;
+			perf_have_ack = false;
+		}
 		RenderFrame();
 		const auto t1 = std::chrono::steady_clock::now();
+		perf_render_end = t1;
+		perf_waiting_ack = true;
 		if (debug_log) {
 			/* every ~3 s of host time: frames the guest submitted and the host time spent
 			 * rendering them, to tell renderer cost apart from the rest of the emulation */
@@ -1462,8 +1481,13 @@ public:
 			else if (wall >= 3.0) {
 				LOG_MSG("PowerVR: %.1f frames/s submitted, %.1f ms render time per frame, rendering %.0f%% of host time (%u threads, last frame %u planes)",
 					perf_frames / wall, 1000.0 * perf_render_s / perf_frames, 100.0 * perf_render_s / wall, num_threads, stat_planes);
+				LOG_MSG("PowerVR:   end-of-render acknowledged %u times, after %.1f ms on average; next render started %.1f ms after the acknowledgement; %.1f INT_STATUS reads per frame; IRQ %d %s",
+					perf_acks, perf_acks ? 1000.0 * perf_ack_s / perf_acks : 0.0, perf_gaps ? 1000.0 * perf_gap_s / perf_gaps : 0.0,
+					(double)perf_status_reads / perf_frames, irq, (regs[PCX_INTMASK] & INT_END_OF_RENDER) ? "unmasked" : "masked");
 				perf_frames = 0;
 				perf_render_s = 0;
+				perf_acks = perf_gaps = perf_status_reads = 0;
+				perf_ack_s = perf_gap_s = 0;
 				perf_start = t1;
 			}
 		}
