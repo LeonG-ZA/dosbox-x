@@ -108,9 +108,20 @@ feature.
 - The RISC runs `verite_risc_mhz` (default 25) cycles per emulated millisecond. It also
   runs immediately when the host polls FIFOInFree/FIFOOutValid/Debug while waiting for
   it.
-- Bt485 cursor modes: 1 = three colour, 2 = two colour with highlight (11 = invert),
-  3 = X Window. The cursor's screen position is (CX−64, CY−64), as in X.org
-  `verite_movecursor`.
+- Bt485 cursor modes: 1 = three colour, 2 = XGA, 3 = X Window. Each pixel's value is
+  (plane 1, plane 0):
+  - XGA: 00 = colour 1, 01 = colour 2, 10 = transparent, 11 = complement. The Windows 98
+    drivers use this mode, with the AND mask in plane 1 and the XOR mask in plane 0.
+  - A 32×32 cursor uses 256 bytes of cursor RAM: plane 0 at 00h, plane 1 at 80h. The
+    address wraps from FFh to 00h, and the drivers rely on that: they load both masks
+    with one run starting at 80h.
+  - The cursor's screen position is (CX − size, CY − size): (CX−64, CY−64) for 64×64, as
+    in X.org `verite_movecursor`, and (CX−32, CY−32) for 32×32. The Windows drivers place
+    the pointer at the screen centre with (432, 332).
+- The pixel PLL word is `(M−2) << 10 | P << 8 | (N−2)`, with M 8 bits wide. X.org never
+  produces M above 129, but Rendition's BIOS does (640×480 is `3463Ah`, M = 211).
+  Words with bit 18 or 19 set are not frequencies: the BIOS latches `40000h` after every
+  clock change. They are ignored.
 - Direct colour modes are always displayed without the palette, even after AX=1587h
   BX=2 clears the Bt485 bypass bit (see below).
 
@@ -163,8 +174,15 @@ The `ZC` keyword is what Speedy3D reads:
 - the I/O base >> 8;
 - the memory base >> 24;
 - the IRQ;
-- the memory size in 64KB units (0 = default 4MB);
+- the local memory size in 64KB units (`0040h` for 4MB);
 - then 0020h and zeros.
+
+Speedy3D treats a memory size of 0 as 2MB. It then reserves its top 128KB at `1E0000h`
+(BankSelect) instead of `3E0000h`. Games needing more than about 2MB of frame buffers
+and textures stop: Tomb Raider with "Could not create texture space on board", and the
+Scorched Planet Vérité patch with a misleading "no MOUSE driver installed: unable to
+initialise RenderWare". The Rendition TSR left the field at 0 in our emulator, which is
+how the wrong value got in.
 
 The VPD is rebuilt whenever the guest moves a BAR.
 
@@ -208,6 +226,50 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
     default 25 MHz RISC. Running under Rendition's own TSR gave 37.7 fps;
   - DMA command lists, the input FIFO, the parameterized draws and the palette loader
     are all in use.
+- **DOS games** (built-in DOS, `core=dynamic`, `cycles=max`, `[dos] ems=false`, no TSR):
+  - **Rebel Moon** (Rendition version, `REBMOON`): the demo plays in 640×400×16 with
+    bilinear textures, lighting, sprites and overlays. Some wall and ceiling edges show
+    faint light seams; not yet compared with real hardware.
+  - **IndyCar Racing II** (`ICR2REND`, `INDYCAR.EXE`): runs in 640×480×16, with textured
+    cars, track, trees and banners. This copy's `INDYCAR.EXE` is a modded `CART.EXE`: one
+    dword at file offset F06F8h raises a cache from `1B1000h` to `C04000h`. The game
+    allocates 4× that value plus `19097h` (about 48 MB), so it needs `memsize=64`. With
+    less it stops with "RN1 Error: Could not allocate memory via DPMI". DOS/4GW tracks
+    free memory in a 16-bit KB counter, so 64 MB is also the most it can use.
+  - **Scorched Planet**, CD build (`VERITE\SPVERITE.EXE` with `SPD3D.VOH`): programs the
+    chip directly, without any BIOS calls. The intro videos, the menu and its pixel
+    engine effects work; gameplay is not checked yet, because the menu needs the mouse.
+  - **Scorched Planet**, Vérité patch (`spveis`/`spvamer`, also on the 3D Blaster PCI
+    bonus CD): reaches the menu in its default DMA mode, now that the VPD reports 4MB.
+    Before that fix it stopped with a misleading "no MOUSE driver" message, and then
+    DOS/4GW triple-faulted on exit. The RReady developer reports that its DMA mode locks
+    up on real hardware, and runs it with `SPEEDY3D_DMA=0`.
+  - **Tomb Raider demo** (3D Blaster PCI bonus CD, Speedy3D 1996-11-05 build): reaches the
+    title screen with the 3D passport ring.
+  - **CGL titles** do not start yet: the Hi-Octane 3D Blaster PCI patch (`HIOPCI2`),
+    Battle Arena Toshinden's upgrade, and Rebel Moon with `-3DBLASTER`. Creative's
+    "Verite CGL 1.70 beta 7" (`VRIT?170.CGL`) does not use the Rendition BIOS. It
+    proceeds in this order:
+    1. It sizes memory and soft-resets the RISC by forcing instructions.
+    2. It copies 520 words from RISC address `FFF10000h` to `3FF800h`. That address is
+       inside the board's EPROM (RISC addresses `FFFE0000h` and up in table 5), at offset
+       10000h, the half the host never sees.
+    3. It flushes the instruction cache, jumps to `3FF800h` and streams compressed
+       microcode into the FIFO for that loader to unpack.
+
+    DOSBox-X has no board EPROM, so the copied loader is all zeros and the RISC runs off
+    into memory. Running these titles needs either a dump of a V1000 board's EPROM
+    (a closed-source runtime component, which the brief excludes) or a new loader that
+    accepts the same compressed stream.
+- **Windows 98 SE** (image from the S3 ViRGE tests, `cputype=pentium_mmx`, `core=dynamic`):
+  - It finds the board as "Rendition Verite 1000 PCI" and installs Microsoft's own V1000
+    driver from `DXREND.INF` (`rend.drv`, `rend2d.uc`, `rend3d.uc`). The desktop runs
+    in native 800×600×16, drawn by `rend2d.uc` on the emulated RISC.
+  - The miroCRYSTAL VRX 2.2 driver (`MIRODISP.INF`) installs over it. It runs 800×600×16
+    at 60 Hz through the Rendition 2D microcode, whose idle loop is at `1800h`.
+  - The hardware cursor (32×32, XGA mode) is correct with the 2.2 driver. Microsoft's
+    driver showed the same black box before the XGA and address-wrap fixes, but hasn't
+    been rechecked since.
 
 ## Microcode found in released Rendition software (brief section 6)
 
@@ -219,6 +281,12 @@ SHA-256 are listed for each microcode.
 |---|---|---|---|---|
 | Speedy3D, 1996-11-05 | Tomb Raider (Rendition), Whiplash, an IndyCar II replacement `spd3d.uc` | 67280 | `e50a13579db9e81a` | stripped, loads at `1000h` |
 | Speedy3D (vQuake), 1996-11-07 | vQuake 1.08b1 | 65176 | `a7151eefd5740389` | stripped; vQuake's `spd3d.uc2` "for V2x00" is byte-identical |
+| Speedy3D, 1996-09-13 | IndyCar Racing II Rendition (`ICR2REND`), Scorched Planet Vérité patch (all three regions), Descent II Vérité patch | 56680 | `bf7dbd617f5fffbc` | stripped, loads at `1000h`; byte-identical in all of them |
+| Speedy3D pre-alpha | Descent II Vérité patch `SPD3D.VOH` (3D Blaster PCI bonus CD) | 192516 | `b21c8136dd1a1a83` | text format; differs from the Scorched Planet CD's `.VOH` |
+| Speedy3D | Rebel Moon (Rendition version, 1996-12-24) | 56680 | `0ebf8dd4452c0842` | same layout as the one above; 788 code and 14 data words differ |
+| Speedy3D pre-alpha, 1996-03-21 | Scorched Planet CD `VERITE\SPD3D.VOH` (unpatched game) | 21376 words | `$Id: spd3d.voh,v 1.32 1996/04/26` | text format (one hex word per line, `address_` markers), not ELF |
+| DirectX 2 Direct3D | Scorched Planet CD `DIRECTX\DRIVERS\DISPLAY\BIN\D3D.UC` | 94744 | `66bcfffe291ccfe9` | 730 symbols, loads at `4000h` |
+| DirectX 2 Windows 2D | same directory, `WIN31.UC` | 21216 | `a945208c3761df11` | 244 symbols; the "undefined opcodes" in `.text` are pen and brush tables |
 | Speedy3D V2x00 beta, 1997-08 | IndyCar II V2000 patch | 72280 | `c52e32e352ac725f` | symbols present; uses V2x00-only `tri`, `fill`, `cbltf`, `sort` |
 | RRedline 3D, 1997-10 | V1000 reference driver beta 5 `special\v10003d.uc` (also in VHexen II) | 93132 | `602cdb202ebffb3d` | stripped, loads at `8000h` |
 | RRedline 3D | V1000 reference driver 2.1b2 `v10003d.uc` | 93132 | `7f031521373e86a3` | same layout as beta 5; 164 code words differ |
@@ -241,18 +309,29 @@ driver with newer RRedline and OpenGL parts:
 The new OpenGL microcode uses the same 85 opcodes as the 3D microcode, and the core
 implements all of them.
 
-So far the DOS side has two distinct V1000 Speedy3D microcodes:
-- a shared one used by Tomb Raider (Core Design), Whiplash (Gremlin), and the IndyCar II
-  replacement of unknown origin;
-- vQuake's own build.
+The DOS side has five distinct V1000 Speedy3D microcodes:
+- **1996-03 pre-alpha** (`.VOH` text format): the Scorched Planet CD as shipped.
+- **1996-09-13:** IndyCar Racing II and the Scorched Planet Vérité patch. The two files
+  are byte-identical.
+- **Rebel Moon's build:** same size and layout as 1996-09-13, but about 6% of the code
+  differs.
+- **1996-11-05:** shared by Tomb Raider (Core Design), Whiplash (Gremlin) and the IndyCar
+  II replacement `spd3d.uc` of unknown origin.
+- **vQuake's own build.**
 
-The `SPD3D.UC` files for Scorched Planet, IndyCar II (as shipped) and Rebel Moon are
-still needed to complete the comparison. Speedy3D loads `SPD3D.UC` from the current
-directory unless the `SPEEDY3D` environment variable names another file (IndyCar II V2000
-readme).
+So no single microcode can be assumed per game, and LLE covers all of them.
+
+The two Scorched Planet patches carry the same `SPD3D.UC`; only `SPVERITE.EXE` differs:
+- `spvamer` is for the American retail CD;
+- `spveis` is for the English/Italian/Spanish one, which is the European CD image used
+  here.
+
+Speedy3D loads `SPD3D.UC` from the current directory unless the `SPEEDY3D` environment
+variable names another file (IndyCar II V2000 readme).
 
 Every V1000 microcode above uses only instructions the core implements: no
-triangle/fill-engine opcodes and no undefined ones. All of them rely heavily on the
+triangle/fill-engine opcodes and no undefined ones. (The only undefined words in `.text`
+are data tables, such as `WIN31.UC`'s.) All of them rely heavily on the
 parameterized `draw1`–`draw5`/`rdraw1`–`rdraw5` paths and on `step q` (perspective and
 reciprocals). vQuake exercises these paths and renders correctly.
 
@@ -275,21 +354,24 @@ because it runs whatever microcode is uploaded.
 - 3D microcode beyond vQuake: RRedline (`v10003d.uc`), the other Speedy3D builds and the
   V2x00-only instructions. Fog and blending modes that vQuake doesn't use follow [SPEC]
   but are unverified.
-- Windows 9x V1000 drivers: DirectDraw and RRedline (brief phases 1–2).
-- The DOS games (brief phase 3): Scorched Planet, IndyCar Racing II, Rebel Moon.
+- Windows 9x: DirectDraw, Direct3D and RRedline applications (brief phases 1–2). Only
+  the 2D desktop has been checked so far.
+- The DOS games (brief phase 3): Rebel Moon, IndyCar Racing II and the Tomb Raider demo
+  run. Both Scorched Planet builds reach their menu. Still open: actual gameplay (the
+  menus need the mouse), and the CGL titles (see Testing done).
 - Exact pixel engine rounding (bilinear filter, dithering, fog) has no hardware reference
   and aims at "visually correct".
-- Bt485 cursor mode encodings have not been checked against a real driver.
+- Bt485 cursor modes 1 and 3 and the 64×64 cursor have not been seen in use.
 
 ## Next steps
 
-1. Windows V1000 driver package and a Windows 95/98 image: boot with
-   `machine=svga_verite`, install the driver, and check the accelerated desktop and the
-   hardware cursor. Record which `.UC` the DirectDraw/Direct3D HAL loads (brief section 4).
-2. Extract the `.UC` files from the three DOS games and hash/diff them against each other
-   and against the Windows ones with `tools/veritedis.py --info/--census` (brief
-   section 6).
-3. Run the games; fix the 3D paths with the microcode symbols and `verite_debug` traces.
-   Any further BIOS functions they call are logged as "unknown Rendition BIOS function".
+1. Windows 98: run DirectDraw and Direct3D/RRedline software, and record which `.UC` the
+   DirectDraw/Direct3D HAL loads (brief section 4). Compare Microsoft's `rend2d.uc` and
+   `rend3d.uc` with the Rendition files.
+2. Play the three DOS games (in-game, mouse-driven menus), and check Rebel Moon's edge
+   seams against real hardware captures.
+3. CGL titles: decide between an optional user-supplied board EPROM image and a new
+   loader for CGL's compressed microcode stream. Any further BIOS functions the games
+   call are logged as "unknown Rendition BIOS function".
 4. Profile; add HLE fast paths only where needed, with LLE as the fallback. vQuake runs
    at full speed under LLE, so none are needed yet.

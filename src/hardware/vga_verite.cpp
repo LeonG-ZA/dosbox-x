@@ -111,6 +111,15 @@ public:
 	uint8_t dac_cr0, dac_cr1, dac_cr2, dac_cr3;
 	uint8_t dac_waddr;            /* shadow of the palette write address */
 	uint16_t cursor_addr;         /* cursor RAM address */
+	/* 64x64 cursor: 10-bit address (A9:A8 from CR3). 32x32 cursor (Bt484 compatible): 256
+	 * bytes, A9:A8 ignored and the address wraps from FFh to 00h. The Windows Rendition
+	 * drivers rely on the wrap: they load plane 1 from 80h and then plane 0. */
+	bool Cursor64() const { return (dac_cr3 & 0x04) != 0; }
+	unsigned CursorRamIndex() const { return Cursor64() ? (cursor_addr & 0x3FFu) : (cursor_addr & 0xFFu); }
+	void NextCursorAddr() {
+		cursor_addr = Cursor64() ? (uint16_t)((cursor_addr + 1) & 0x3FF)
+		                         : (uint16_t)((cursor_addr & 0x300) | ((cursor_addr + 1) & 0xFF));
+	}
 	uint8_t curcol_addr, curcol_comp;
 	uint8_t curcol[4][3];
 	uint8_t cursor_ram[1024];
@@ -118,14 +127,19 @@ public:
 
 	/* pixel PLL: 20 bits shifted in serially, latched by a read */
 	uint32_t pll_shift, pll_value;
+	unsigned pll_bits; /* bits shifted in since the last latch (debug) */
 
 	/* scheduling */
 	bool irq_asserted;
+	unsigned irq_log_left;  /* debug: IRQ changes still to log */
+	uint64_t irq_raises;    /* debug */
 	unsigned stat_frames;
 
 	VeriteBoard() : core(NULL), debug(false), trace_left(0), dma_en_saved(0), irq(0), mem_bar(0), io_bar(0), risc_hz(25e6) {
 		ResetRegs();
 		irq_asserted = false;
+		irq_log_left = 40;
+		irq_raises = 0;
 		stat_frames = 0;
 	}
 
@@ -147,6 +161,7 @@ public:
 		memset(cursor_ram, 0, sizeof(cursor_ram));
 		cursor_x = cursor_y = cursor_x_pending = cursor_y_pending = 0;
 		pll_shift = 0;
+		pll_bits = 0;
 		pll_value = (9u << 10) | (0u << 8) | 8u; /* M=11 N=10 P=0: 31.5MHz */
 	}
 
@@ -189,7 +204,9 @@ void DrawCursor(uint32_t *out, unsigned width, int y) {
 	const uint8_t mode = board->dac_cr2 & 3;
 	if (mode == 0) return;
 	const int size = (board->dac_cr3 & 4) ? 64 : 32;
-	const int cy0 = (int)board->cursor_y - 64, cx0 = (int)board->cursor_x - 64;
+	/* the position registers give the cursor's bottom right corner + 1: (CX-64, CY-64) for
+	 * the 64x64 cursor as in X.org, (CX-32, CY-32) for the 32x32 one the Windows drivers use */
+	const int cy0 = (int)board->cursor_y - size, cx0 = (int)board->cursor_x - size;
 	if (board->cursor_x == 0 && board->cursor_y == 0) return; /* (0,0) is off screen */
 	const int row = y - cy0;
 	if (row < 0 || row >= size) return;
@@ -208,8 +225,9 @@ void DrawCursor(uint32_t *out, unsigned width, int y) {
 			case 1: /* three colour: 0 transparent, 1..3 cursor colours 1..3 */
 				if (v) out[x] = color(v);
 				break;
-			case 2: /* two colour highlight: 10 = colour 1, 11 = complement */
-				if (v == 2) out[x] = color(1);
+			case 2: /* XGA: 00 = colour 1, 01 = colour 2, 10 = transparent, 11 = complement
+			         * (the Windows 98 Rendition driver: plane 1 = AND mask, plane 0 = XOR mask) */
+				if (v < 2) out[x] = color(v + 1);
 				else if (v == 3) out[x] ^= 0x00FFFFFFu;
 				break;
 			default: /* X Window: 10 = colour 1, 11 = colour 2 */
@@ -259,8 +277,10 @@ uint8_t *DrawNative(Bitu vidstart, Bitu /*line*/) {
 }
 
 double VeriteBoard::PixelClock() const {
-	/* [XORG] vmodes.c: value = (M-2)<<10 | P<<8 | (N-2), f = 14.318 * 2 * M / N / 2^P MHz */
-	const unsigned m = ((pll_value >> 10) & 0x7F) + 2, p = (pll_value >> 8) & 3, n = (pll_value & 0xFF) + 2;
+	/* [XORG] vmodes.c: value = (M-2)<<10 | P<<8 | (N-2), f = 14.318 * 2 * M / N / 2^P MHz.
+	 * M is 8 bits wide: Rendition's BIOS and Windows drivers use M above 129 (640x480 at
+	 * 25.175 MHz is 3463Ah, M = 211), which X.org's search never produces. */
+	const unsigned m = ((pll_value >> 10) & 0xFF) + 2, p = (pll_value >> 8) & 3, n = (pll_value & 0xFF) + 2;
 	double f = 14.31818e6 * 2.0 * m / n / (double)(1u << p);
 	if (dac_cr3 & 0x08) f *= 2.0; /* Bt485 clock doubler */
 	if (f < 5e6 || f > 250e6) f = 25.175e6;
@@ -476,8 +496,8 @@ uint8_t VeriteBoard::DacRead(unsigned r) {
 			if ((dac_cr0 & 0x80) && dac_waddr == 0x01) return dac_cr3;
 			return 0x20; /* status: Bt485 id/revision bits */
 		case 0xB: {
-			const uint8_t v = cursor_ram[cursor_addr & 0x3FF];
-			cursor_addr = (cursor_addr + 1) & 0x3FF;
+			const uint8_t v = cursor_ram[CursorRamIndex()];
+			NextCursorAddr();
 			return v;
 		}
 		case 0xC: return (uint8_t)cursor_x;
@@ -521,8 +541,8 @@ void VeriteBoard::DacWrite(unsigned r, uint8_t v) {
 			}
 			break;
 		case 0xB:
-			cursor_ram[cursor_addr & 0x3FF] = v;
-			cursor_addr = (cursor_addr + 1) & 0x3FF;
+			cursor_ram[CursorRamIndex()] = v;
+			NextCursorAddr();
 			break;
 		case 0xC: cursor_x_pending = (uint16_t)((cursor_x_pending & 0xF00) | v); break;
 		case 0xD: cursor_x_pending = (uint16_t)((cursor_x_pending & 0x0FF) | ((v & 0xFu) << 8)); break;
@@ -545,8 +565,11 @@ uint32_t VeriteBoard::ExtRegRead(uint32_t off, unsigned len) {
 	}
 	if (off >= 0xC0) {
 		if (off == 0xC0) {
-			/* reading the PLL device latches the bits shifted in */
-			pll_value = pll_shift & 0xFFFFFu;
+			/* reading the PLL device latches the bits shifted in. Words with bit 18 or 19 set
+			 * are not frequencies: Rendition's BIOS latches 40000h after every clock change. */
+			if (!(pll_shift & 0xC0000u)) pll_value = pll_shift & 0x3FFFFu;
+			if (debug && pll_bits) LOG_MSG("Verite: PLL latched %05x after %u bits, pixel clock %.3f MHz", pll_shift, pll_bits, PixelClock() / 1e6);
+			pll_bits = 0;
 			if (vga.native.active) UpdateDisplay();
 		}
 		uint32_t r = 0;
@@ -572,7 +595,7 @@ void VeriteBoard::ExtRegWrite(uint32_t off, uint32_t val, unsigned len) {
 		return;
 	}
 	if (off >= 0xC0) {
-		if (off == 0xC0) pll_shift = ((pll_shift << 1) | (val & 1u)) & 0xFFFFFu;
+		if (off == 0xC0) { pll_shift = ((pll_shift << 1) | (val & 1u)) & 0xFFFFFu; pll_bits++; }
 		for (unsigned i = 0; i < len && off + i < 0x100; i++) devregs[off + i - 0xC0] = (uint8_t)(val >> (8 * i));
 		return;
 	}
@@ -596,6 +619,12 @@ void VeriteBoard::ExtRegWrite(uint32_t off, uint32_t val, unsigned len) {
 void VeriteBoard::IrqUpdate(bool asserted) {
 	if (irq <= 0 || asserted == irq_asserted) return;
 	irq_asserted = asserted;
+	if (asserted) irq_raises++;
+	if (debug && irq_log_left) {
+		irq_log_left--;
+		LOG_MSG("Verite: IRQ %d %s, intr %04x intren %04x, RISC pc %08x", irq, asserted ? "raised" : "dropped",
+			(unsigned)core->IORead(Verite::IO_INTR, 2), (unsigned)core->IORead(Verite::IO_INTREN, 2), core->pc);
+	}
 	if (asserted) PIC_ActivateIRQ((unsigned int)irq);
 	else PIC_DeActivateIRQ((unsigned int)irq);
 }
@@ -803,8 +832,9 @@ uint32_t BoardMemBase() {
 }
 
 /* Vital product data in the format the Rendition BIOS presents it (PCI VPD resource
- * tags). Speedy3D reads the "ZC" keyword: I/O base >> 8, memory base >> 24, IRQ, memory
- * size in 64KB units (0 = 4MB default), then words the BIOS sets to 0020h and 0. */
+ * tags). Speedy3D reads the "ZC" keyword: I/O base >> 8, memory base >> 24, IRQ, the
+ * local memory size in 64KB units (Speedy3D assumes 2MB when it is 0, and Tomb Raider
+ * and Scorched Planet then fail to allocate texture space), then a word 0020h and 0. */
 void WriteVpd() {
 	if (!rom_phys || !vpd_off) return;
 	const uint32_t io = board ? board->io_bar : DEFAULT_IO_BASE;
@@ -826,7 +856,7 @@ void WriteVpd() {
 	v[n++] = (uint8_t)(io >> 8);
 	v[n++] = (uint8_t)(BoardMemBase() >> 24);
 	v[n++] = (uint8_t)(irq > 0 ? irq : 0);
-	v[n++] = 0; v[n++] = 0;                                /* memory size: default */
+	v[n++] = (uint8_t)(LOCAL_MEMORY >> 16); v[n++] = (uint8_t)(LOCAL_MEMORY >> 24);
 	v[n++] = 0x20; v[n++] = 0;
 	for (unsigned i = 0; i < 9; i++) v[n++] = 0;
 	v[n++] = 'Z'; v[n++] = 'R'; v[n++] = 4; v[n++] = 0; v[n++] = 0; v[n++] = 0x14; v[n++] = 0;
@@ -918,11 +948,16 @@ void VERITE_VSync(void) {
 	if (b.Native()) b.core->VerticalRetrace();
 	b.stat_frames++;
 	if (b.debug && (b.stat_frames % 600) == 0) {
-		LOG_MSG("Verite: %llu RISC instructions, %llu pixels, pc %08x",
-			(unsigned long long)b.core->instructions, (unsigned long long)b.core->pixels, b.core->pc);
+		LOG_MSG("Verite: %llu RISC instructions, %llu pixels, pc %08x, %llu IRQs",
+			(unsigned long long)b.core->instructions, (unsigned long long)b.core->pixels, b.core->pc,
+			(unsigned long long)b.irq_raises);
 		LOG_MSG("Verite: crtcctl %08x horz %08x vert %08x offset %04x mode %02x memendian %u, DAC cr0 %02x cr1 %02x, frame %06x",
 			b.crtc_ctl, b.crtc_horz, b.crtc_vert, b.crtc_offset, b.core->ModeReg(), b.core->MemEndian(),
 			b.dac_cr0, b.dac_cr1, b.framebase_a);
+		LOG_MSG("Verite: cursor cr2 %02x cr3 %02x at %u,%u, colours %02x%02x%02x %02x%02x%02x %02x%02x%02x",
+			b.dac_cr2, b.dac_cr3, b.cursor_x, b.cursor_y,
+			b.curcol[1][0], b.curcol[1][1], b.curcol[1][2], b.curcol[2][0], b.curcol[2][1], b.curcol[2][2],
+			b.curcol[3][0], b.curcol[3][1], b.curcol[3][2]);
 	}
 }
 
