@@ -636,11 +636,41 @@ static void TrapezoidRun(void) {
 	int32_t xmax = A.sc_right;
 	if ((int32_t)A.dst_pitch > 0 && xmax >= (int32_t)A.dst_pitch) xmax = (int32_t)A.dst_pitch - 1;
 
+	if (m64snap_on && use3d && ((R(M64_TEX_SIZE_PITCH) & 0xF) < ((R(M64_TEX_SIZE_PITCH) >> 4) & 0xF)) && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK: starting registers of narrow-map trapezoids, for offline replay */
+		static const unsigned int regs[] = { 0x40, 0x41, 0x42, 0x45, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4E, 0x4F, 0x50, 0x7F, 0xB4, 0xB6, 0xC0, 0xC1, 0xC2,
+			0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
+			0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
+			0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xFC, 0xFD, 0xFE, 0xAA, 0xAD, 0xB0, 0xB1, 0xB2 };
+		char b[1400]; size_t o = (size_t)snprintf(b, sizeof(b), "TS %u", m64snap_seq);
+		for (unsigned int r : regs) o += (size_t)snprintf(b + o, sizeof(b) - o, " %02x=%08x", r, (unsigned)R(r));
+		snprintf(b + o, sizeof(b) - o, "\n");
+		m64snap_log += b;
+	}
 	if (use3d) Mach64_3D_TrapBegin();
 	uint32_t sn_drawn = 0, sn_clip = 0, sn_keep = 0, sn_rows = 0; int32_t sn_x0 = 1 << 20, sn_x1 = -(1 << 20), sn_y0 = 1 << 20, sn_y1 = -(1 << 20);   /* TEST HOOK */
 	const unsigned int sn_z0 = m64snap_zfail, sn_r0 = m64snap_rej;
 	const int32_t sn_lx = lead_x, sn_tx = trail_x, sn_y = y, sn_le = lead_err, sn_te = trail_err;
 
+	/* ASSUMPTION: an edge whose error is still positive when the trapezoid
+	 * starts has not been stepped into place yet (ATI3DCIF and the D3D HAL
+	 * load such errors); it is stepped, as each scan line's edge is, before
+	 * the first row is drawn, and the interpolators follow the leading edge.
+	 * Drawing from the unstepped x put the rows of nearly flat edges up to a
+	 * dozen pixels past the edge: the texture ran off the map and wrapped
+	 * (a white dash under Assault Rigs' moving logo, the dot at the top right
+	 * of Wipeout's glyphs). Both edges, so a shared edge stays consistent. */
+	static int prestep = -1; if (prestep < 0) prestep = getenv("DOSBOX_X_M64PRESTEP") ? atoi(getenv("DOSBOX_X_M64PRESTEP")) : 2;   /* TEST HOOK: 0 off, 1 trailing edge, 2 both */
+	if (prestep >= 1) {
+		for (int steps = 0; steps < 8192 && (trail_err > 0 || (trail_err == 0 && !trail_zneg)) && trail_dec < 0; steps++) {
+			trail_x += trail_dir; trail_err += trail_dec;
+		}
+	}
+	if (prestep >= 2) {
+		for (int steps = 0; steps < 8192 && (lead_err > 0 || (lead_err == 0 && !lead_zneg)) && lead_dec < 0; steps++) {
+			lead_x += lead_dir; lead_err += lead_dec;
+			if (use3d) Mach64_3D_EdgeStepX();
+		}
+	}
 	for (int32_t l = 0; l < lines; l++) {
 		/* ASSUMPTION: the right edge's x is drawn (DST_POLYGON_RTEDGE_DIS
 		 * [RRG 4-48] leaves it out), except for a vertical trailing edge on the
@@ -648,14 +678,12 @@ static void TrapezoidRun(void) {
 		 * such an edge one past the glyph: drawing it showed the next glyph's first
 		 * column (Wipeout and Assault Rigs text). A vertical leading edge on the
 		 * right keeps its x: Wipeout's pilot logo tiles end there and had gaps
-		 * without it. A trailing edge stepping left with a positive error (not
-		 * yet stepped: the first row of a triangle) lies left of its x, so the x
-		 * is left out too (the dot at the top right of Wipeout's glyphs).
+		 * without it (see above for edges whose error is still positive).
 		 * Otherwise sloped edges keep the x (Assault Rigs' meshes cracked). */
 		const int32_t lo = fill_lr ? lead_x : trail_x;
 		int32_t hi = fill_lr ? trail_x : lead_x;
 		static int oldedge = -1; if (oldedge < 0) oldedge = getenv("DOSBOX_X_M64OLDEDGE") ? 1 : 0;   /* TEST HOOK: always draw the right x */
-		if (rtedge_dis || (!oldedge && fill_lr && (trail_inc == 0 || (trail_dir < 0 && trail_err > 0)))) hi--;
+		if (rtedge_dis || (!oldedge && fill_lr && (trail_inc == 0 || (prestep == 0 && trail_dir < 0 && trail_err > 0)))) hi--;
 		if (m64snap_on && lo <= hi) { if (y < A.sc_top || y > A.sc_bottom || y < 0) sn_clip += (uint32_t)(hi - lo + 1); else { if (lo < xmin) sn_clip += (uint32_t)(xmin - lo); if (hi > xmax) sn_clip += (uint32_t)(hi - xmax); } }
 		if (lo <= hi && y >= A.sc_top && y <= A.sc_bottom && y >= 0) {
 			const int32_t dl = lo < xmin ? xmin : lo;
