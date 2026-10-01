@@ -636,7 +636,8 @@ static void TrapezoidRun(void) {
 	int32_t xmax = A.sc_right;
 	if ((int32_t)A.dst_pitch > 0 && xmax >= (int32_t)A.dst_pitch) xmax = (int32_t)A.dst_pitch - 1;
 
-	if (m64snap_on && use3d && ((R(M64_TEX_SIZE_PITCH) & 0xF) < ((R(M64_TEX_SIZE_PITCH) >> 4) & 0xF)) && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK: starting registers of narrow-map trapezoids, for offline replay */
+	static int snapall = -1; if (snapall < 0) snapall = getenv("DOSBOX_X_M64SNAPALL") ? 1 : 0;   /* TEST HOOK: DOSBOX_X_M64SNAPALL logs every 3D trapezoid */
+	if (m64snap_on && use3d && (snapall || (R(M64_TEX_SIZE_PITCH) & 0xF) < ((R(M64_TEX_SIZE_PITCH) >> 4) & 0xF)) && m64snap_log.size() < (32u << 20)) {   /* TEST HOOK: starting registers of narrow-map trapezoids, for offline replay */
 		static const unsigned int regs[] = { 0x40, 0x41, 0x42, 0x45, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4E, 0x4F, 0x50, 0x7F, 0xB4, 0xB6, 0xC0, 0xC1, 0xC2,
 			0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
 			0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
