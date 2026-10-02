@@ -5,7 +5,8 @@ Next version:
     Rendition's BIOS TSR. (LeonG-ZA)
   - Added a built-in CGL driver for Verite games written for Creative's 3D
     Blaster PCI ([verite] verite_cgl): when a game loads its VRIT*.CGL module,
-    the calls are handled by DOSBox-X. Rebel Moon -3DBLASTER runs. (LeonG-ZA)
+    the calls are handled by DOSBox-X. Rebel Moon -3DBLASTER and the Hi-Octane
+    3D Blaster PCI patch run. (LeonG-ZA)
   - Fixed DOS FCB operations trying to read/write from device_CON when performed
     on an unopened or non-existent file. (cimarronm)
   - Don't prompt for working directory when -conf or -userconf is used

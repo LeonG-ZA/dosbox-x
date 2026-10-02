@@ -374,6 +374,8 @@ enum { TEX_MODULATE = 0, TEX_DECAL = 1, TEX_COPY = 3 };
 enum { WRAP_CLAMP = 0, WRAP_REPEAT = 1, WRAP_MIRROR = 2 };
 enum { CMP_NEVER, CMP_LESS, CMP_EQUAL, CMP_LEQUAL, CMP_GREATER, CMP_NOTEQUAL, CMP_GEQUAL, CMP_ALWAYS };
 
+const uint32_t TEX_GAP = 0x10000;
+
 /* screen modes by number */
 const uint16_t mode_size[16][2] = {
 	{ 320, 200 }, { 320, 240 }, { 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 1024 }, { 640, 480 }, { 800, 600 },
@@ -389,7 +391,7 @@ struct Screen {
 	uint32_t pitch = 0, buf[2] = { 0, 0 };
 	unsigned front = 0, target = 0;   /* buf[] indices: displayed, drawn into */
 	std::vector<uint16_t> depth;
-	uint32_t tex_base = 0;            /* card memory after the frame buffers */
+	uint32_t tex_base = 0;            /* texture memory: after the frame buffers and a gap */
 };
 
 struct Render {
@@ -877,7 +879,9 @@ int16_t CheckScreen(uint32_t p, unsigned &w, unsigned &h, unsigned &fmt, unsigne
 	if (option > 2) return ERR_DEPTH_STENCIL_OPTION;
 	Verite::Core *c = Card();
 	const uint32_t frame = ((w * FormatBytes(fmt) * h) + 0xFFFu) & ~0xFFFu;
-	if (!c || frame * buffers > c->MemSize()) return ERR_NOT_ENOUGH_VRAM;
+	if (!c || frame * buffers + TEX_GAP >= c->MemSize()) return ERR_NOT_ENOUGH_VRAM;
+	/* dwUB_BufferSize: the texture memory left, which games size their texture caches by */
+	Wr32(p, 10, c->MemSize() - (frame * buffers + TEX_GAP));
 	return ERR_NONE;
 }
 
@@ -900,7 +904,9 @@ int16_t InitScreen(uint32_t p) {
 	s.buf[1] = buffers == 2 ? frame : 0;
 	s.front = 0;
 	s.target = buffers == 2 ? 1 : 0;
-	s.tex_base = frame * buffers;
+	/* Hi-Octane addresses its staging rows from about 32KB below texture address 0; the gap
+	 * keeps them out of the frame buffers */
+	s.tex_base = frame * buffers + TEX_GAP;
 	s.depth.assign(option ? (size_t)w * h : 0, 0xFFFF);
 	const unsigned type = fmt == FMT_8888 ? M_LIN32 : (fmt == FMT_CI8 ? M_LIN8 : M_LIN15);
 	if (!VERITE_CglSetMode(w, h, type)) return ERR_SCREEN_MODE;
@@ -1049,6 +1055,21 @@ int16_t Transfer(uint32_t p, bool down) {
 	return ERR_NONE;
 }
 
+/* Waits for the next vertical sync (at most 50 ms of emulated time) by having the call's stub
+ * run again until then. */
+void SyncPending() {
+	if (!cgl.waiting) {
+		cgl.wait_frame = VERITE_FrameCount() + 1;
+		cgl.wait_until = PIC_FullIndex() + 50.0;
+		cgl.waiting = true;
+	}
+	if (VERITE_FrameCount() < cgl.wait_frame && PIC_FullIndex() < cgl.wait_until) {
+		cgl.retry = true;
+		return;
+	}
+	cgl.waiting = false;
+}
+
 int16_t Call(unsigned f) {
 	Screen &s = rs.scr;
 	const char *name = cgl_funcs[f].name;
@@ -1088,21 +1109,12 @@ int16_t Call(unsigned f) {
 	if (!strcmp(name, "cglSwapBuffer")) {
 		/* the new frame is shown from the next vertical sync, and the call returns then, as on
 		 * the card: a game draws no faster than the display refreshes */
-		if (!cgl.waiting) {
-			if (s.buffers == 2) {
-				s.front ^= 1;
-				s.target = s.front ^ 1;
-				VERITE_SetDisplayStart(BufferAddr(s.front));
-			}
-			cgl.wait_frame = VERITE_FrameCount() + 1;
-			cgl.wait_until = PIC_FullIndex() + 50.0;
-			cgl.waiting = true;
+		if (!cgl.waiting && s.buffers == 2) {
+			s.front ^= 1;
+			s.target = s.front ^ 1;
+			VERITE_SetDisplayStart(BufferAddr(s.front));
 		}
-		if (VERITE_FrameCount() < cgl.wait_frame && PIC_FullIndex() < cgl.wait_until) {
-			cgl.retry = true;
-			return ERR_NONE;
-		}
-		cgl.waiting = false;
+		SyncPending();
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglSelectRenderBuffer")) {
@@ -1113,12 +1125,14 @@ int16_t Call(unsigned f) {
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglCopyDisplayBuffer")) {
-		if (s.buffers == 2) {
+		/* paced by the display like a swap */
+		if (!cgl.waiting && s.buffers == 2) {
 			const unsigned dir = Arg(0) & 0xFFFF;
 			const uint32_t from = BufferAddr(dir == 1 ? s.front : s.front ^ 1), to = BufferAddr(dir == 1 ? s.front ^ 1 : s.front);
 			Verite::Core *c = Card();
 			for (uint32_t i = 0; i < s.pitch * s.height; i += 4) c->Write32(to + i, c->Read32(from + i));
 		}
+		SyncPending();
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglClearScreen")) {

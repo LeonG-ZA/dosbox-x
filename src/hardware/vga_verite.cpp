@@ -724,7 +724,6 @@ public:
 	void writed(PhysPt addr, uint32_t v) override { board->core->MemWrite(Off(addr), v, 4); }
 };
 
-
 /* MemEndian = 0: the host byte layout is the storage layout, so map host pointers */
 class Verite_DirectHandler : public PageHandler {
 public:

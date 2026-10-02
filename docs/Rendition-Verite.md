@@ -333,8 +333,13 @@ Instead, `[verite] verite_cgl=true` (the default) gives them a built-in CGL driv
 - **Screen.**
   - `cglInitScreen` sets a native mode on the emulated Vérité (mode 14 is 640×400) in 5551,
     8888 or 8-bit colour, with one or two buffers.
+  - `cglQueryScreen` and `cglInitScreen` report the texture memory left in
+    `dwUB_BufferSize`. Hi-Octane sizes its texture cache from it; with 0 it reused one
+    staging area for every tile of its menu background.
   - `cglSwapBuffer` flips at the next vertical sync and returns only then: it re-runs its
     stub until the sync, so games draw no faster than the display refreshes.
+    `cglCopyDisplayBuffer` (back to front) is paced the same way: at 150 frames a second,
+    Hi-Octane's menus didn't react to the keyboard.
   - Depth (16-bit) is kept on the host.
 - **Drawing.** `cglSendStream` takes a list of pointers to render headers:
   - **Header layout:** operation, vertex count, primitive, property mask, one 16-bit field,
@@ -350,8 +355,10 @@ Instead, `[verite] verite_cgl=true` (the default) gives them a built-in CGL driv
   - **Filtering:** bilinear when the environment asks for filtering and the texture has no
     transparent texels.
   - **Also supported:** depth test, depth cue and constant alpha blending.
+  - Hi-Octane sets property bits above 200h on some quads (F800h, FC00h); they are ignored.
 - **Textures.**
-  - Addresses count from the start of texture memory, after the frame buffers.
+  - Addresses count from the start of texture memory, which begins 64KB after the frame
+    buffers: Hi-Octane addresses its staging rows from about 32KB below address 0.
   - `cglLoadTextureMap` loads at `dwFreeByteAddress` and advances it.
   - `wBufferWidth` is the card-side row stride, so a game can keep textures in one wide
     surface.
@@ -367,12 +374,12 @@ Status:
 
 - **Rebel Moon** (`REB3D.BAT`, i.e. `-3DBLASTER`) runs: title screen, menus, mission
   briefing and textured 3D gameplay with its status bar.
-- **Hi-Octane** (3D Blaster PCI patch `HIOPCI2`):
-  - It reaches the language menu with the right font and highlight.
-  - The menu background is wrong. The game treats texture memory as one 1024×2048 surface
-    and writes its staging images through `cglLockBuffer` at addresses that assume a
-    different card memory layout from ours (its writes span almost the whole 4MB).
-    Gameplay is untested.
+- **Hi-Octane** (3D Blaster PCI patch `HIOPCI2`, `EXEC\HIOCTANE.EXE`) runs: menus,
+  championship, track and car selection with their 3D models, and races with the HUD,
+  opponents, smoke and fog. It keeps texture memory as one 1024-wide surface and writes
+  most of its 2D graphics (menu backgrounds, text) straight into it and into the back buffer
+  through `cglLockBuffer`. Its menus read the keyboard state once a frame and miss presses
+  held much longer than a normal keystroke, as the software build (`HIOSW.EXE`) does too.
 - **Battle Arena Toshinden** (bonus CD upgrade): not tested; the game data isn't on the
   bonus CD.
 - **Flight Unlimited** (bonus CD): stops with DOS/4GW's "Not enough files! Please set
@@ -485,7 +492,6 @@ runs whatever microcode is uploaded.
    `rend3d.uc` with the Rendition files.
 2. Play the three DOS games (in-game, mouse-driven menus), and check Rebel Moon's edge
    seams against real hardware captures.
-3. CGL: the card memory layout Hi-Octane expects (where texture memory and the frame
-   buffers sit), the functions still missing, and more titles.
+3. CGL: the functions still missing, more titles, and Rebel Moon's edge seams.
 4. Profile; add HLE fast paths only where needed, with LLE as the fallback. vQuake runs
    at full speed under LLE, so none are needed yet.
