@@ -343,6 +343,8 @@ void VeriteBoard::UpdateDisplay() {
 	}
 	if (n.active != was) VGA_SetupHandlers();
 	VGA_DetermineMode();
+	/* the palette lookup bypasses the attribute controller while native */
+	if (n.active != was) VGA_DAC_UpdateColorPalette();
 	VGA_StartResize();
 }
 

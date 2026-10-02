@@ -67,7 +67,9 @@ PowerVR work.
     doubling, CRTCStatus/CRTCTest scan position, and the FrameDisplayed/FrameSwitched
     flags;
   - the V1000's external Bt485-compatible RAMDAC: palette through DOSBox-X's DAC, 6/8-bit
-    width, and the 64×64 or 32×32 hardware cursor;
+    width, and the 64×64 or 32×32 hardware cursor. In native 8bpp the pixel indexes the
+    palette directly (through the pixel read mask only), not through the VGA attribute
+    controller;
   - the external pixel PLL, programmed serially through I/O `C0h`.
   - Native mode is drawn through a small generic `vga.native` override in `vga_draw.cpp`
     that mirrors the existing DOSBox-IG hooks.
@@ -295,6 +297,12 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
   - POD 2.0 (Ubisoft) runs through its Direct3D build (`PODD3DX.EXE`/`WPODD3D.EXE`); the
     CD has no Rendition-native build (its other builds are PowerVR, ATI 3D CIF, S3D,
     Glide, Matrox and software).
+  - MechWarrior 2 Titanium Edition: the main menu runs in native 640×480×8 with an 8-bit
+    DAC. Its colours were scrambled until native 8bpp stopped going through DOSBox-X's
+    attribute controller mapping (the 16-entry table, still holding text mode values,
+    folded the 256 indices onto 16 palette entries). In game (640×480×16), colours are
+    correct with both the Rendition and Direct3D renderers. Both show a black box at the
+    bottom left, not yet identified as HUD or fault.
 
 ## Microcode found in released Rendition software (brief section 6)
 

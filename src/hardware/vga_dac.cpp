@@ -144,7 +144,11 @@ void VGA_DAC_UpdateColor( Bitu index ) {
     Bitu maskIndex;
 
     if (IS_VGA_ARCH) {
-        if (vga.dosboxig.svga) {
+        if (vga.native.active) {
+            /* a card's own CRTC (vga.native) feeds pixels to the RAMDAC without the attribute controller */
+            maskIndex = index & vga.dac.pel_mask;
+        }
+        else if (vga.dosboxig.svga) {
             if ((vga.mode == M_EGA || vga.mode == M_LIN4) && !vga.dosboxig.vga_acpal_bypass)
                 maskIndex = vga.dac.combine[index&0xF] & vga.dac.pel_mask;
             else
