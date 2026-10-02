@@ -45,4 +45,15 @@ uint32_t VERITE_GetDisplayStart(void);
 void VERITE_SetPitch(uint32_t bytes);
 uint32_t VERITE_GetPitch(void);
 
+/* CGL: when a game opens a Verite CGL driver module, swap in the built-in one (true if done) */
+class DOS_File;
+bool VERITE_CglReplaceModule(DOS_File **file, const char *fullname);
+/* for the built-in CGL driver: native display of width x height in a linear VGAModes type, back
+ * to VGA, and the card's local memory */
+namespace Verite { class Core; }
+bool VERITE_CglSetMode(unsigned width, unsigned height, unsigned type);
+void VERITE_CglEndMode(void);
+Verite::Core *VERITE_GetCore(void);
+uint64_t VERITE_FrameCount(void); /* vertical syncs so far */
+
 #endif

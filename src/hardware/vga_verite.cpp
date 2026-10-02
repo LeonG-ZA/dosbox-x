@@ -724,6 +724,7 @@ public:
 	void writed(PhysPt addr, uint32_t v) override { board->core->MemWrite(Off(addr), v, 4); }
 };
 
+
 /* MemEndian = 0: the host byte layout is the storage layout, so map host pointers */
 class Verite_DirectHandler : public PageHandler {
 public:
@@ -1213,6 +1214,31 @@ void VERITE_SetBank(uint32_t offset) {
 
 uint32_t VERITE_GetBank(void) {
 	return board ? (board->core->BankSelect() & 0x00FFE000u) : 0;
+}
+
+Verite::Core *VERITE_GetCore(void) {
+	return board ? board->core : NULL;
+}
+
+uint64_t VERITE_FrameCount(void) {
+	return board ? board->stat_frames : 0;
+}
+
+bool VERITE_CglSetMode(unsigned width, unsigned height, unsigned type) {
+	if (!board) return false;
+	VideoModeBlock m = {};
+	m.mode = 0x1FF;
+	m.type = (VGAModes)type;
+	m.swidth = width;
+	m.sheight = height;
+	VERITE_BeginSetMode();
+	return VERITE_FinishSetMode(&m, true);
+}
+
+void VERITE_CglEndMode(void) {
+	if (!board) return;
+	VERITE_BeginSetMode();
+	board->UpdateDisplay();
 }
 
 void VERITE_SetDisplayStart(uint32_t offset) {

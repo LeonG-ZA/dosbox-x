@@ -3542,6 +3542,10 @@ void DOSBOX_SetupConfigSections(void) {
     Pint->Set_help("Log this many host accesses to the Verite (I/O registers and PCI configuration), and as many RISC\n"
                    "accesses to its control registers, for troubleshooting.");
 
+    Pbool = secprop->Add_bool("verite_cgl",Property::Changeable::WhenIdle,true);
+    Pbool->Set_help("Run games written for Creative's CGL on the 3D Blaster PCI: when a game loads one of its Verite CGL\n"
+                    "driver modules (VRIT*.CGL), use DOSBox-X's own driver instead.");
+
     secprop=control->AddSection_prop("mixer",&Null_Init);
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);
     Pbool->Set_help("Enable silent mode, sound is still emulated though.");

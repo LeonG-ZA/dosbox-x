@@ -40,6 +40,7 @@
 #include "ide.h"
 #include "bios_disk.h"
 #include "imagedisk_eltorito.h"
+#include "verite.h"
 
 #define DOS_FILESTART 4
 
@@ -1118,7 +1119,10 @@ bool DOS_OpenFile(char const * name,uint8_t flags,uint16_t * entry,bool fcb) {
 		uint16_t olderror=dos.errorcode;
 		dos.errorcode=0;
 		exists=Drives[drive]->FileOpen(&Files[handle],fullname,flags) || Drives[drive]->FileOpen(&Files[handle],upcase(fullname),flags);
-		if (exists) Files[handle]->SetDrive(drive);
+		if (exists) {
+			Files[handle]->SetDrive(drive);
+			VERITE_CglReplaceModule(&Files[handle], fullname); /* CGL drivers for the 3D Blaster PCI */
+		}
 		else if (dos.errorcode==DOSERR_ACCESS_CODE_INVALID) return false;
 		dos.errorcode=olderror;
 	}

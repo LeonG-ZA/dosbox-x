@@ -80,6 +80,8 @@ PowerVR work.
   - Standard VGA modes 00h–13h use DOSBox-X's VGA emulation.
 - **Rendition BIOS extensions** (INT 10h AH=15h), the vital product data in the VGA ROM
   and VBE mode 7Fh. Speedy3D games need these to find and start the board (see below).
+- **CGL**: a built-in driver for games written for Creative's 3D Blaster PCI, which can't
+  run Creative's own driver here (see the CGL section).
 
 ## Behaviour [SPEC] leaves open, and what is assumed
 
@@ -263,21 +265,8 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
     up on real hardware, and runs it with `SPEEDY3D_DMA=0`.
   - **Tomb Raider demo** (3D Blaster PCI bonus CD, Speedy3D 1996-11-05 build): reaches the
     title screen with the 3D passport ring.
-  - **CGL titles** do not start yet: the Hi-Octane 3D Blaster PCI patch (`HIOPCI2`),
-    Battle Arena Toshinden's upgrade, and Rebel Moon with `-3DBLASTER`. Creative's
-    "Verite CGL 1.70 beta 7" (`VRIT?170.CGL`) does not use the Rendition BIOS. It
-    proceeds in this order:
-    1. It sizes memory and soft-resets the RISC by forcing instructions.
-    2. It copies 520 words from RISC address `FFF10000h` to `3FF800h`. That address is
-       inside the board's EPROM (RISC addresses `FFFE0000h` and up in table 5), at offset
-       10000h, the half the host never sees.
-    3. It flushes the instruction cache, jumps to `3FF800h` and streams compressed
-       microcode into the FIFO for that loader to unpack.
-
-    DOSBox-X has no board EPROM, so the copied loader is all zeros and the RISC runs off
-    into memory. Running these titles needs either a dump of a V1000 board's EPROM
-    (a closed-source runtime component, which the brief excludes) or a new loader that
-    accepts the same compressed stream.
+  - **CGL titles** (Creative's own API for the 3D Blaster PCI) run through the built-in CGL
+    driver described in the CGL section, not on the RISC.
 - **Windows 98 SE** (image from the S3 ViRGE tests, `cputype=pentium_mmx`, `core=dynamic`):
   - It finds the board as "Rendition Verite 1000 PCI" and installs Microsoft's own V1000
     driver from `DXREND.INF` (`rend.drv`, `rend2d.uc`, `rend3d.uc`). The desktop runs
@@ -304,6 +293,93 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
     correct with both the Rendition and Direct3D renderers. Both show a black box at the
     bottom left, as the PowerVR build does on DOSBox-X's PowerVR emulation, so it is
     probably the game's own HUD.
+
+## CGL (3D Blaster PCI games)
+
+Games written for Creative's 3D Blaster PCI use Creative's CGL (Creative Graphics Library),
+not Speedy3D. Creative's Vérité driver, "Verite CGL 1.70 beta 7" (`VRIT?170.CGL`), doesn't
+use the Rendition BIOS. It copies a 520-word RISC loader from the board's EPROM (RISC address
+`FFF10000h`, the half of the EPROM the host never sees) to `3FF800h`, then streams compressed
+microcode for that loader to unpack. DOSBox-X has no board EPROM, and a dump would be a
+closed-source runtime component, so these titles can't run on the emulated RISC.
+
+Instead, `[verite] verite_cgl=true` (the default) gives them a built-in CGL driver
+(`src/hardware/verite_cgl.cpp`):
+
+- **Loading.** The games link a loader that finds `*.cgl` in their own directory, reads each
+  module's header and loads the variant they were built for:
+
+  | File | Coordinates | Arguments |
+  |---|---|---|
+  | `VRITB170.CGL` | 16.16 fixed point | registers (Watcom) |
+  | `VRITC170.CGL` | 16.16 fixed point | stack, removed by the caller |
+  | `VRITE170.CGL` | float | registers |
+  | `VRITI170.CGL` | float | stack |
+
+  The variant is the dword at file offset 77h, after "HOT2".
+- **The module served.** When a game opens one of these files, DOSBox-X serves a copy of it
+  instead:
+  - Header, object, page, entry and name tables keep their layout and sizes, and so does the
+    file size. The loader therefore makes exactly the allocations it would for Creative's
+    module. Hi-Octane is sensitive to this: with smaller tables, its own heap bookkeeping
+    records a block of size 0 and later loops forever on a corrupted list.
+  - Every code and data page is cleared and every fixup range emptied, so none of the
+    module's code runs.
+  - Each export is an 8-byte stub at the start of the code object: a DOSBox-X callback, the
+    function number and the variant.
+  - Nothing has to be added to the game's directory.
+- **Calls.** Arguments come from the registers or the stack, by variant; coordinates are
+  16.16 fixed point or floats. The handler returns to the caller itself.
+- **Screen.**
+  - `cglInitScreen` sets a native mode on the emulated Vérité (mode 14 is 640×400) in 5551,
+    8888 or 8-bit colour, with one or two buffers.
+  - `cglSwapBuffer` flips at the next vertical sync and returns only then: it re-runs its
+    stub until the sync, so games draw no faster than the display refreshes.
+  - Depth (16-bit) is kept on the host.
+- **Drawing.** `cglSendStream` takes a list of pointers to render headers:
+  - **Header layout:** operation, vertex count, primitive, property mask, one 16-bit field,
+    then pointers to depth, stencil, blend, texture environment, vertices, texture
+    coordinates, colours and depth cue.
+  - **Arrays:** they hold only what the property mask enables: x,y (plus z with depth),
+    s,t (plus q with perspective), BGRA colours.
+  - **Primitives:** points, lines, triangles, strips, fans, quads and rectangles (two
+    corners) are drawn by a software rasteriser into the card's frame buffer.
+  - **Texture modes:** modulate, decal and copy.
+  - **Transparency:** "overlay" makes texels with a clear 5551 alpha bit transparent, and
+    chroma keying is supported.
+  - **Filtering:** bilinear when the environment asks for filtering and the texture has no
+    transparent texels.
+  - **Also supported:** depth test, depth cue and constant alpha blending.
+- **Textures.**
+  - Addresses count from the start of texture memory, after the frame buffers.
+  - `cglLoadTextureMap` loads at `dwFreeByteAddress` and advances it.
+  - `wBufferWidth` is the card-side row stride, so a game can keep textures in one wide
+    surface.
+  - Addressing is linear, as on the V1000 (which has wrap masks but no clamping): Hi-Octane
+    addresses its sources with coordinates past the texture's width and negative rows.
+- **Host access.**
+  - `cglDownLoad` and `cglUpLoad` copy rectangles between host memory and the frame or depth
+    buffer, with no blend, constant alpha or per-pixel alpha.
+  - `cglLockBuffer` returns a far pointer into the card's memory window (valid while DOS/4GW
+    maps linear addresses to physical ones).
+
+Status:
+
+- **Rebel Moon** (`REB3D.BAT`, i.e. `-3DBLASTER`) runs: title screen, menus, mission
+  briefing and textured 3D gameplay with its status bar.
+- **Hi-Octane** (3D Blaster PCI patch `HIOPCI2`):
+  - It reaches the language menu with the right font and highlight.
+  - The menu background is wrong. The game treats texture memory as one 1024×2048 surface
+    and writes its staging images through `cglLockBuffer` at addresses that assume a
+    different card memory layout from ours (its writes span almost the whole 4MB).
+    Gameplay is untested.
+- **Battle Arena Toshinden** (bonus CD upgrade): not tested; the game data isn't on the
+  bonus CD.
+- **Flight Unlimited** (bonus CD): stops with DOS/4GW's "Not enough files! Please set
+  FILES=30", unrelated to CGL.
+- **Not implemented:** copy streams, spans, stencil, logic operations, picking, cursors and
+  interrupts. These are logged with `verite_debug=true`, which also logs each distinct
+  render setup and texture load.
 
 ## Microcode found in released Rendition software (brief section 6)
 
@@ -398,7 +474,7 @@ runs whatever microcode is uploaded.
   only the desktop and DxDiag's DirectDraw and Direct3D 7 tests have been checked.
 - The DOS games (brief phase 3): Rebel Moon, IndyCar Racing II and the Tomb Raider demo
   run. Both Scorched Planet builds reach their menu. Still open: actual gameplay (the
-  menus need the mouse), and the CGL titles (see Testing done).
+  menus need the mouse). For the CGL titles see the CGL section.
 - Exact pixel engine rounding (bilinear filter, dithering, fog) has no hardware reference
   and aims at "visually correct".
 - Bt485 cursor modes 1 and 3 and the 64×64 cursor have not been seen in use.
@@ -409,8 +485,7 @@ runs whatever microcode is uploaded.
    `rend3d.uc` with the Rendition files.
 2. Play the three DOS games (in-game, mouse-driven menus), and check Rebel Moon's edge
    seams against real hardware captures.
-3. CGL titles: decide between an optional user-supplied board EPROM image and a new
-   loader for CGL's compressed microcode stream. Any further BIOS functions the games
-   call are logged as "unknown Rendition BIOS function".
+3. CGL: the card memory layout Hi-Octane expects (where texture memory and the frame
+   buffers sit), the functions still missing, and more titles.
 4. Profile; add HLE fast paths only where needed, with LLE as the fallback. vQuake runs
    at full speed under LLE, so none are needed yet.
