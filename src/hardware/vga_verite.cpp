@@ -100,6 +100,7 @@ public:
 	int irq;
 	uint32_t mem_bar, io_bar;
 	double risc_hz;
+	double risc_time; /* emulated time (PIC_FullIndex, ms) the RISC has been run up to */
 
 	/* CRTC */
 	uint32_t crtc_test, crtc_ctl, crtc_horz, crtc_horz_pending, crtc_vert;
@@ -135,7 +136,7 @@ public:
 	uint64_t irq_raises;    /* debug */
 	unsigned stat_frames;
 
-	VeriteBoard() : core(NULL), debug(false), trace_left(0), dma_en_saved(0), irq(0), mem_bar(0), io_bar(0), risc_hz(25e6) {
+	VeriteBoard() : core(NULL), debug(false), trace_left(0), dma_en_saved(0), irq(0), mem_bar(0), io_bar(0), risc_hz(25e6), risc_time(0) {
 		ResetRegs();
 		irq_asserted = false;
 		irq_log_left = 40;
@@ -172,6 +173,7 @@ public:
 	uint32_t DmaRead32(uint32_t phys) override { return phys_readd(phys); }
 	void ModeChanged() override;
 	void MemEndianChanged() override { PAGING_ClearTLB(); }
+	uint32_t CatchUpBudget() override;
 	void Message(const char *msg) override { LOG_MSG("%s", msg); }
 
 	/* ---- helpers ---- */
@@ -629,6 +631,14 @@ void VeriteBoard::IrqUpdate(bool asserted) {
 	else PIC_DeActivateIRQ((unsigned int)irq);
 }
 
+uint32_t VeriteBoard::CatchUpBudget() {
+	const double owed = (PIC_FullIndex() - risc_time) * risc_hz / 1000.0;
+	if (owed < 1.0) return 0;
+	const uint32_t n = owed > 20000.0 ? 20000u : (uint32_t)owed;
+	risc_time += n * 1000.0 / risc_hz;
+	return n;
+}
+
 void VeriteBoard::ModeChanged() {
 	UpdateDisplay();
 	VGA_SetupHandlers();
@@ -868,11 +878,18 @@ void WriteVpd() {
 /* ---------------------------------------------------------------------------------- */
 /* scheduling                                                                         */
 
+/* The RISC runs risc_hz instructions per second of emulated time: in this 1ms tick, and
+ * early when the host polls for it (CatchUpBudget), but never ahead of the clock. */
 void VERITE_Tick(Bitu /*val*/) {
 	if (!board) return;
-	const uint32_t budget = (uint32_t)(board->risc_hz / 1000.0);
-	const uint32_t used = board->core->Runnable() ? board->core->Run(budget) : 0;
-	if (used < budget) board->core->Idle(budget - used);
+	VeriteBoard &b = *board;
+	const double now = PIC_FullIndex();
+	double owed = (now - b.risc_time) * b.risc_hz / 1000.0;
+	if (owed > 4.0 * b.risc_hz / 1000.0) owed = 4.0 * b.risc_hz / 1000.0; /* after a pause */
+	const uint32_t budget = owed > 0 ? (uint32_t)owed : 0;
+	const uint32_t used = b.core->Runnable() ? b.core->Run(budget) : 0;
+	if (used < budget) b.core->Idle(budget - used);
+	b.risc_time = now;
 	PIC_AddEvent(VERITE_Tick, 1.0);
 }
 
@@ -924,6 +941,7 @@ void InstallBoard() {
 	MapMemory(mem);
 	MapIO(DEFAULT_IO_BASE);
 	IO_RegisterReadHandler(0x3DE, read_p3de, IO_MB, 2);
+	board->risc_time = PIC_FullIndex();
 	PIC_AddEvent(VERITE_Tick, 1.0);
 	LOG_MSG("Rendition Verite V1000 installed: 4MB local memory at %08x, I/O at %04x, IRQ %d, RISC %d MHz",
 		mem, DEFAULT_IO_BASE, board->irq, mhz);

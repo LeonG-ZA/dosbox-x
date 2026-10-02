@@ -403,6 +403,7 @@ void Core::PEReset() {
 	memset(&pe, 0, sizeof(pe));
 	pe.pmask = 0xFFFFFFFFu;
 	pe.yuv_contrast = 41;
+	pe.src_mask = 0x07FF07FFu; /* no wrapping until the microcode sets it */
 	pe.scissor_x = 0x000007FFu;
 	pe.scissor_y = 0x000007FFu;
 }
@@ -471,16 +472,21 @@ uint32_t Core::IORead(uint32_t off, unsigned len) {
 	return r;
 }
 
+void Core::CatchUp() {
+	const uint32_t n = board ? board->CatchUpBudget() : 20000u;
+	if (n) Run(n);
+}
+
 uint8_t Core::ByteRead(uint32_t off) {
 	switch (off) {
 		case IO_FIFOINFREE: {
 			/* the host polls this while waiting for room: let the RISC catch up */
-			if (in_count >= IN_FIFO_SIZE - 1 && Runnable()) Run(20000);
+			if (in_count >= IN_FIFO_SIZE - 1 && Runnable()) CatchUp();
 			const unsigned free_entries = IN_FIFO_SIZE - in_count;
 			return (uint8_t)std::min(free_entries, 31u);
 		}
 		case IO_FIFOOUTVALID:
-			if (out_count == 0 && Runnable()) Run(20000);
+			if (out_count == 0 && Runnable()) CatchUp();
 			return (uint8_t)std::min(out_count, 7u);
 		case IO_COMM:
 			return (uint8_t)((comm_sys & 0x0F) | (flag & FLAG_STATUS_MASK));
@@ -1618,7 +1624,11 @@ void Core::DrawParallel(uint8_t op, unsigned d, unsigned s2, unsigned s1) {
 	const unsigned sbpp = std::max(1u, FormatBytes((pe.src_mode & 0xF) ? (pe.src_mode & 0xF) : pe.dst_fmt));
 	const bool y_in = y >= 0 && (unsigned)y >= sy0 && (unsigned)y < sy1 && y < 2048;
 	const uint32_t drow = pe.dst_base + (y >= 0 ? RowOffset((uint32_t)y, pe.stride >> 8) : 0);
-	const uint32_t srow = pe.src_base + (v >= 0 ? RowOffset((uint32_t)v, pe.stride) : 0);
+	/* [SPEC] 4.2: UMask/VMask apply to U and V as the pixel engine receives them, also
+	 * for parallel draws. The 2D microcode's colour brush fill relies on it: it draws
+	 * from an 8x8 brush in memory with SrcMask = 7,7 (Windows 98 tooltips). */
+	const int umask = (int)(pe.src_mask & 0x7FFu), vmask = (int)((pe.src_mask >> 16) & 0x7FFu);
+	const uint32_t srow = pe.src_base + RowOffset((uint32_t)(v & vmask), pe.stride);
 	const uint32_t cmask = pe.chroma_mask, ccol = pe.chroma_color & cmask;
 
 	for (uint32_t i = 0; i < total; i++, x += step, u += step) {
@@ -1632,7 +1642,7 @@ void Core::DrawParallel(uint8_t op, unsigned d, unsigned s2, unsigned s1) {
 		uint32_t s;
 		if (!fg) s = Lane(pe.bg_color, x, bpp);
 		else if (use_src) {
-			s = ReadRaw(*this, srow + (uint32_t)u * sbpp, sbpp);
+			s = ReadRaw(*this, srow + (uint32_t)(u & umask) * sbpp, sbpp);
 			if (chroma && (Replicate(s, sbpp) & cmask) == ccol) continue;
 		}
 		else s = Lane(pe.fg_color, x, bpp);

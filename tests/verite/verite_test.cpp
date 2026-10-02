@@ -535,6 +535,36 @@ static void Test2DMicrocode(const char *ucpath, const std::string &outdir) {
 		CHECK(px(20, 300) == green, "line start pixel");
 	}
 
+	/* colour brush fill, as the Windows 98 driver draws tooltips: LoadColorBrush (5) with 8
+	 * rows of 4 words (two 565 pixels each), then FillRectColorBrushRop (24): ROP, x/y,
+	 * w/h, brush origin. The microcode draws from the brush in memory with SrcMask = 7,7. */
+	auto brush = [](unsigned r, unsigned col) -> uint16_t { return (uint16_t)(0x1000u + r * 8u + col); };
+	h.waitfifo(1);
+	h.out32(IO_FIFO0, 5);
+	for (unsigned r = 0; r < 8; r++)
+		for (unsigned k = 0; k < 4; k++) {
+			h.waitfifo(1);
+			h.out32(IO_FIFO0, ((uint32_t)brush(r, 2 * k) << 16) | brush(r, 2 * k + 1));
+		}
+	const unsigned bx = 400, by = 40, bw = 37, bh = 21, ox = 3, oy = 5;
+	h.waitfifo(5);
+	h.out32(IO_FIFO0, 24);
+	h.out32(IO_FIFO0, 0xC);
+	h.out32(IO_FIFO0, (bx << 16) | by);
+	h.out32(IO_FIFO0, (bw << 16) | bh);
+	h.out32(IO_FIFO0, (ox << 16) | oy);
+	sync();
+	{
+		unsigned bad = 0, outside = 0;
+		for (unsigned y = by; y < by + bh; y++)
+			for (unsigned x = bx; x < bx + bw; x++)
+				if (px(x, y) != brush((y - oy) & 7, (x - ox) & 7)) bad++;
+		for (unsigned x = bx; x < bx + bw; x++) if (px(x, by + bh) != 0) outside++;
+		CHECK(bad == 0, "colour brush fill: %u wrong pixels (%u,%u = %04x, %u,%u = %04x)", bad,
+			bx, by + 10, px(bx, by + 10), bx + 20, by + 10, px(bx + 20, by + 10));
+		CHECK(outside == 0, "colour brush fill: %u pixels below the rectangle", outside);
+	}
+
 	WritePPM(c, (outdir + "/verite_2d.ppm").c_str(), MC_SIZE, W, H, pitch);
 	printf("2D microcode: %llu RISC instructions, %llu pixels, pc %08x\n",
 		(unsigned long long)c.instructions, (unsigned long long)c.pixels, c.pc);

@@ -155,6 +155,11 @@ public:
 	virtual void ModeChanged() = 0;
 	/* MemEndian changed: host mappings of local memory need refreshing */
 	virtual void MemEndianChanged() {}
+	/* RISC instructions that may run now because the host polls a register while waiting
+	 * for the RISC. A board with a clock should limit this to the time that has passed:
+	 * if the RISC itself waits for vertical retrace, unbounded catch-up runs stall the
+	 * emulated clock and the retrace never seems to come. */
+	virtual uint32_t CatchUpBudget() { return 20000; }
 	/* Diagnostics */
 	virtual void Message(const char *msg) = 0;
 };
@@ -307,6 +312,7 @@ private:
 	uint32_t StateRead(unsigned index);
 	void ByteWrite(uint32_t off, uint8_t v);
 	uint8_t ByteRead(uint32_t off);
+	void CatchUp(); /* run the RISC while the host polls for it, within Board::CatchUpBudget() */
 	void DmaStart();
 	void DmaPump();
 

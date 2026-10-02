@@ -93,6 +93,11 @@ feature.
   leave Cnt at 0. Pixels taken from XShadow advance it one pixel in XDir.
 - Parallel draws walk the source one pixel per destination pixel in XDir. The dU value
   the microcode loads (0 or `FFF80000h`) is not used.
+- SrcMask (UMask/VMask) applies to every source read, parallel draws included, as [SPEC]
+  4.2 says for U and V entering the pixel engine. The 2D microcode's colour brush fill
+  (`FillRectColorBrush`) depends on it: it draws from an 8×8 brush in memory with
+  SrcMask = 7,7. Windows 98 draws its tooltips that way; before this they came out black.
+  SrcMask resets to all ones.
 - DrawCtl pair 2 values 0–7 are not listed in [SPEC] table 2.9c. They are assumed equal
   to pair 3/4 values 0–7, and their use is logged.
 - Local memory is stored as host-endian 32-bit words. The RISC is big-endian, and
@@ -105,9 +110,15 @@ feature.
   pixels sit at big-endian RISC byte addresses.
 - The pixel engine is synchronous: PixelBusy reads 0. The icache and line buffer are not
   emulated, so memory is always coherent.
-- The RISC runs `verite_risc_mhz` (default 25) cycles per emulated millisecond. It also
-  runs immediately when the host polls FIFOInFree/FIFOOutValid/Debug while waiting for
-  it.
+- The RISC runs `verite_risc_mhz` (default 25, as on the V1000) million instructions per
+  emulated second. A 1ms tick runs the instructions it is owed. When the host polls
+  FIFOInFree or FIFOOutValid while waiting for the RISC, it can run early, but only up
+  to the instructions owed for the emulated time that has passed.
+  - Before this limit, every such poll ran 20000 instructions while the emulated clock
+    stood still. When the microcode itself waited for vertical retrace, as in a
+    full-screen DirectDraw page flip, the retrace took seconds to arrive.
+  - Draw instructions count as one instruction however many pixels they draw, so the
+    pixel engine is faster than real hardware.
 - Bt485 cursor modes: 1 = three colour, 2 = XGA, 3 = X Window. Each pixel's value is
   (plane 1, plane 0):
   - XGA: 00 = colour 1, 01 = colour 2, 10 = transparent, 11 = complement. The Windows 98
@@ -210,8 +221,10 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
     loop, ELF upload with MemEndian byte swap, and SETUP;
   - solid fill with copy and XOR ROPs;
   - screen-to-screen blit, plain and overlapping (right-to-left, bottom-up);
-  - solid line, and GET_PIXEL sync.
-  48 checks pass. The frame buffer is also written to `verite_2d.ppm`.
+  - solid line, and GET_PIXEL sync;
+  - a colour brush fill (`LoadColorBrush` and `FillRectColorBrushRop`, as Windows draws
+    tooltips) with a non-zero brush origin.
+  51 checks pass. The frame buffer is also written to `verite_2d.ppm`.
 - In DOSBox-X with `machine=svga_verite`:
   - PCI detection and VGA text mode work.
   - VESA mode 111h switches to native 640×480×16 at 60Hz, and the bank window draws.
@@ -222,8 +235,10 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
   BIOS with no TSR loaded:
   - E1M1 renders correctly in 320×200×16 (line-doubled native mode) with textures,
     perspective, lighting and the status bar;
-  - `timedemo demo1` gives 969 frames in 25.9 s, 37.4 fps at `cycles=max` with the
-    default 25 MHz RISC. Running under Rendition's own TSR gave 37.7 fps;
+  - `timedemo demo1` gives 969 frames in 39.9 s, 24.3 fps at `cycles=max` with the
+    default 25 MHz RISC, and 29.0 fps with `verite_risc_mhz=100`;
+  - earlier runs scored about 37 fps, but the old catch-up let the RISC run while the
+    emulated clock (which the timedemo measures) stood still;
   - DMA command lists, the input FIFO, the parameterized draws and the palette loader
     are all in use.
 - **DOS games** (built-in DOS, `core=dynamic`, `cycles=max`, `[dos] ems=false`, no TSR):
@@ -270,6 +285,16 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
   - The hardware cursor (32×32, XGA mode) is correct with the 2.2 driver. Microsoft's
     driver showed the same black box before the XGA and address-wrap fixes, but hasn't
     been rechecked since.
+  - DxDiag (DirectX 9.0c) with the 2.2 driver:
+    - DirectDraw: all tests pass, including the full-screen 640×480 bouncing box at
+      normal speed;
+    - Direct3D 7: the textured, rotating DirectX cube renders correctly full screen;
+    - the Direct3D 8 and 9 tests are skipped, because the driver doesn't support them.
+  - Tooltips (yellow, drawn with a colour brush in an off-screen buffer and slid in with
+    `DDBlt`) draw correctly since the SrcMask fix.
+  - POD 2.0 (Ubisoft) runs through its Direct3D build (`PODD3DX.EXE`/`WPODD3D.EXE`); the
+    CD has no Rendition-native build (its other builds are PowerVR, ATI 3D CIF, S3D,
+    Glide, Matrox and software).
 
 ## Microcode found in released Rendition software (brief section 6)
 
@@ -345,17 +370,23 @@ The INF points RRedline at the 3D file with the registry value
 `HKLM\SOFTWARE\RRedline\v1000\microcode`. So a single shared microcode is not a safe
 assumption.
 
-It is still open which file the DirectDraw/Direct3D HAL (`v100032.dll`) loads. That has
-to be observed at runtime under Windows 9x. The emulation does not depend on the answer,
-because it runs whatever microcode is uploaded.
+Observed with the 2.2 driver in Windows 98:
+- the desktop and DirectDraw run the 2D microcode (idle loop at `1800h`);
+- for Direct3D the driver loads a 3D microcode at `8000h` (the RISC ran at `8F1Ch`
+  during the DxDiag cube), and reloads the 2D one afterwards.
+
+So **DirectDraw and Direct3D do not share microcode**. `v10003d.uc` and `v1000gl.uc`
+both load at `8000h`, so the PC alone does not say which of the two Direct3D uses (RRedline
+is configured for `v10003d.uc`). The emulation does not depend on the answer, because it
+runs whatever microcode is uploaded.
 
 ## Not yet verified (needs real software)
 
 - 3D microcode beyond vQuake: RRedline (`v10003d.uc`), the other Speedy3D builds and the
   V2x00-only instructions. Fog and blending modes that vQuake doesn't use follow [SPEC]
   but are unverified.
-- Windows 9x: DirectDraw, Direct3D and RRedline applications (brief phases 1–2). Only
-  the 2D desktop has been checked so far.
+- Windows 9x: real DirectDraw, Direct3D and RRedline games (brief phases 1–2). So far
+  only the desktop and DxDiag's DirectDraw and Direct3D 7 tests have been checked.
 - The DOS games (brief phase 3): Rebel Moon, IndyCar Racing II and the Tomb Raider demo
   run. Both Scorched Planet builds reach their menu. Still open: actual gameplay (the
   menus need the mouse), and the CGL titles (see Testing done).
@@ -365,8 +396,7 @@ because it runs whatever microcode is uploaded.
 
 ## Next steps
 
-1. Windows 98: run DirectDraw and Direct3D/RRedline software, and record which `.UC` the
-   DirectDraw/Direct3D HAL loads (brief section 4). Compare Microsoft's `rend2d.uc` and
+1. Windows 98: run Direct3D and RRedline games, and compare Microsoft's `rend2d.uc` and
    `rend3d.uc` with the Rendition files.
 2. Play the three DOS games (in-game, mouse-driven menus), and check Rebel Moon's edge
    seams against real hardware captures.
