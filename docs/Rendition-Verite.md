@@ -302,7 +302,8 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
     attribute controller mapping (the 16-entry table, still holding text mode values,
     folded the 256 indices onto 16 palette entries). In game (640×480×16), colours are
     correct with both the Rendition and Direct3D renderers. Both show a black box at the
-    bottom left, not yet identified as HUD or fault.
+    bottom left, as the PowerVR build does on DOSBox-X's PowerVR emulation, so it is
+    probably the game's own HUD.
 
 ## Microcode found in released Rendition software (brief section 6)
 
