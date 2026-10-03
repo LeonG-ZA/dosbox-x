@@ -357,8 +357,11 @@ Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL drive
   - **Texture modes:** modulate, decal and copy.
   - **Transparency:** "overlay" makes texels with a clear 5551 alpha bit transparent, and
     chroma keying is supported.
-  - **Filtering:** bilinear when the environment asks for filtering and the texture has no
-    transparent texels.
+  - **Filtering:** bilinear when the environment asks for it (`wTextureFilter` non-zero).
+    Transparent texels (overlay or chroma key) are left out of the blend, so their colour
+    doesn't bleed into the edges, and a pixel is a hole when they carry half the weight or
+    more. Flight Unlimited sets overlay on all its textures, and asks for filtering when the
+    "Blending" option in its Renderer menu is on (it is off by default).
   - **Also supported:** depth test, depth cue and constant alpha blending.
   - Hi-Octane sets property bits above 200h on some quads (F800h, FC00h); they are ignored.
 - **Textures.**

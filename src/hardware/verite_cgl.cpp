@@ -549,9 +549,15 @@ int Wrap(int i, unsigned size, unsigned mode) {
 	}
 }
 
-/* bilinear filtering between the four texels around (u, v); texel centres at +0.5. Textures
- * with transparent texels are sampled without filtering, so the key colour can't bleed. */
-void SampleBilinear(const TexEnv &t, float u, float v, uint8_t out[4]) {
+bool Transparent(const TexEnv &t, const uint8_t c[4]) {
+	if (t.overlay && c[3] < 128) return true;
+	return t.chroma && c[0] == t.chroma_bgra[0] && c[1] == t.chroma_bgra[1] && c[2] == t.chroma_bgra[2];
+}
+
+/* bilinear filtering between the four texels around (u, v); texel centres at +0.5. Transparent
+ * texels (overlay or chroma key) take no part, so their colour can't bleed into the edges; the
+ * pixel is a hole when they carry at least half the weight. Returns false for a hole. */
+bool SampleBilinear(const TexEnv &t, float u, float v, uint8_t out[4]) {
 	u -= 0.5f;
 	v -= 0.5f;
 	const float fu = floorf(u), fv = floorf(v);
@@ -565,10 +571,17 @@ void SampleBilinear(const TexEnv &t, float u, float v, uint8_t out[4]) {
 	Texel(t.addr + ((uint32_t)y0 * t.stride + (uint32_t)x1) * tb, t.fmt, t.bgr, c[1]);
 	Texel(t.addr + ((uint32_t)y1 * t.stride + (uint32_t)x0) * tb, t.fmt, t.bgr, c[2]);
 	Texel(t.addr + ((uint32_t)y1 * t.stride + (uint32_t)x1) * tb, t.fmt, t.bgr, c[3]);
-	for (unsigned i = 0; i < 4; i++) {
-		const int top = c[0][i] * (256 - wu) + c[1][i] * wu, bottom = c[2][i] * (256 - wu) + c[3][i] * wu;
-		out[i] = (uint8_t)((top * (256 - wv) + bottom * wv) >> 16);
+	int w[4] = { (256 - wu) * (256 - wv), wu * (256 - wv), (256 - wu) * wv, wu * wv };
+	int total = 0;
+	for (unsigned k = 0; k < 4; k++) {
+		if (Transparent(t, c[k])) w[k] = 0;
+		total += w[k];
 	}
+	if (total * 2 <= 65536) return false;
+	for (unsigned i = 0; i < 4; i++)
+		out[i] = (uint8_t)((c[0][i] * w[0] + c[1][i] * w[1] + c[2][i] * w[2] + c[3][i] * w[3]) / total);
+	if (t.overlay) out[3] = 255;
+	return true;
 }
 
 bool DepthPass(unsigned func, uint32_t z, uint32_t stored) {
@@ -603,16 +616,16 @@ void Fragment(const Prim &p, int x, int y, const float *a) {
 			if (q != 0.0f) { u /= q; v /= q; }
 		}
 		uint8_t t[4];
-		if (p.tex.filter && !p.tex.overlay && !p.tex.chroma) SampleBilinear(p.tex, u, v, t);
+		/* overlay: texels with a clear alpha bit are holes; chroma: so are those of the key colour */
+		if (p.tex.filter) {
+			if (!SampleBilinear(p.tex, u, v, t)) return;
+		}
 		else {
 			const int tu = Wrap((int)floorf(u), p.tex.width, p.tex.swrap);
 			const int tv = Wrap((int)floorf(v), p.tex.height, p.tex.twrap);
 			Texel(p.tex.addr + ((uint32_t)tv * p.tex.stride + (uint32_t)tu) * FormatBytes(p.tex.fmt), p.tex.fmt, p.tex.bgr, t);
+			if (Transparent(p.tex, t)) return;
 		}
-		/* overlay: texels with a clear alpha bit are holes; chroma: so are those of the key colour */
-		if (p.tex.overlay && t[3] < 128) return;
-		if (p.tex.chroma && t[0] == p.tex.chroma_bgra[0] && t[1] == p.tex.chroma_bgra[1] && t[2] == p.tex.chroma_bgra[2])
-			return;
 		switch (p.tex.mode) {
 			case TEX_COPY:
 				r = t[2]; g = t[1]; b = t[0]; al = t[3];
@@ -766,7 +779,7 @@ int16_t RenderStream(uint32_t h) {
 		char buf[64];
 		snprintf(buf, sizeof(buf), "%04x mask %03x blend %02x texenv", prim, mask, p_blend ? Rd8(p_blend, 0) : 0);
 		d = buf;
-		for (unsigned i = 4; p_texenv && i < 30; i++) { snprintf(buf, sizeof(buf), " %02x", Rd8(p_texenv, i)); d += buf; }
+		for (unsigned i = 4; p_texenv && (mask & PROP_TEXTURE) && i < 30; i++) { snprintf(buf, sizeof(buf), " %02x", Rd8(p_texenv, i)); d += buf; }
 		if (seen.size() < 100 && seen.insert(d).second) LOG_MSG("CGL: render %s (x%u, first vertex %.1f,%.1f)", d.c_str(), n,
 			Coord(Rd32(p_vertex, 0)), Coord(Rd32(p_vertex, 4)));
 	}
