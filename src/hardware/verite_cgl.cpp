@@ -121,6 +121,10 @@ struct CglState {
 	uint64_t wait_frame = 0;
 	double wait_until = 0.0;
 	uint32_t type = CGL_INT_REG; /* of the module making the current call */
+	uint32_t swap_isr = 0;            /* the game's routine for the end of a buffer swap */
+	bool isr_due = false;             /* call it before the current call returns */
+	bool in_isr = false;              /* it runs; the stub finishes the call when it returns */
+	int16_t isr_result = 0;
 	unsigned log_left[CGL_FUNCS] = {};
 };
 CglState cgl;
@@ -351,6 +355,7 @@ void LogCall(unsigned f) {
 
 enum : int16_t {
 	ERR_NONE = 0,
+	ERR_INSTALL_INTERRUPT_FAILED = 34,
 	ERR_OPERATION = 1013,
 	ERR_NOT_ENOUGH_VRAM = 1202, ERR_SCREEN_MODE = 1203, ERR_DEPTH_STENCIL_OPTION = 1204, ERR_COLOR_FORMAT = 1205,
 	ERR_TEXTURE_HOSTBUFFER = 1800, ERR_TEXTURE_SIZE = 1801, ERR_TEXTURE_EXCEED = 1803,
@@ -358,6 +363,7 @@ enum : int16_t {
 	ERR_MUST_INIT_SCREEN = 32000
 };
 enum { OP_RENDER = 1, OP_COPY = 2 };
+const uint32_t INTR_SWAPBUFFER = 0x0100;
 enum {
 	PRIM_POINT = 0x000, PRIM_LINE = 0x100, PRIM_LINE_STRIP = 0x101, PRIM_LINE_LOOP = 0x102,
 	PRIM_TRIANGLE = 0x200, PRIM_TRIANGLE_STRIP = 0x201, PRIM_TRIANGLE_FAN = 0x202,
@@ -1115,6 +1121,18 @@ int16_t Call(unsigned f) {
 			VERITE_SetDisplayStart(BufferAddr(s.front));
 		}
 		SyncPending();
+		if (!cgl.retry && cgl.swap_isr) cgl.isr_due = true;
+		return ERR_NONE;
+	}
+	if (!strcmp(name, "cglSetupInterrupt") || !strcmp(name, "cglReleaseInterrupt")) {
+		/* only the end of a buffer swap is reported; the vertical retrace and scanline ones
+		 * would have to interrupt the game */
+		const uint32_t mask = Arg(0);
+		if (mask & ~INTR_SWAPBUFFER) {
+			if (rs.unknown_log < 40) { rs.unknown_log++; LOG_MSG("CGL: interrupt %x is not supported", mask & ~INTR_SWAPBUFFER); }
+			if (name[3] == 'S') return ERR_INSTALL_INTERRUPT_FAILED;
+		}
+		if (mask & INTR_SWAPBUFFER) cgl.swap_isr = name[3] == 'S' ? Arg(1) : 0;
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglSelectRenderBuffer")) {
@@ -1214,6 +1232,15 @@ Bitu CGL_Handler(void) {
 	const uint8_t f = mem_readb(SegPhys(cs) + reg_eip);
 	cgl.type = mem_readb(SegPhys(cs) + reg_eip + 1) & 3;
 	card = VERITE_GetCore();
+	if (cgl.in_isr) {
+		/* back from the game's interrupt routine: drop its argument and finish the call */
+		cgl.in_isr = false;
+		reg_esp += 4;
+		reg_eax = (uint32_t)(int32_t)cgl.isr_result;
+		reg_eip = mem_readd(SegPhys(ss) + reg_esp);
+		reg_esp += 4;
+		return CBRET_NONE;
+	}
 	int16_t result = ERR_NONE;
 	cgl.retry = false;
 	if (f < CGL_FUNCS) {
@@ -1227,6 +1254,20 @@ Bitu CGL_Handler(void) {
 		if (result && cgl.log) LOG_MSG("CGL: %s returns %d", cgl_funcs[f].name, result);
 	}
 	else LOG_MSG("CGL: call to an export this driver doesn't know");
+	if (cgl.isr_due) {
+		/* call the routine as the card's interrupt would, with the mask in EAX and on the stack,
+		 * returning to this stub */
+		cgl.isr_due = false;
+		cgl.in_isr = true;
+		cgl.isr_result = result;
+		reg_esp -= 4;
+		mem_writed(SegPhys(ss) + reg_esp, INTR_SWAPBUFFER);
+		reg_esp -= 4;
+		mem_writed(SegPhys(ss) + reg_esp, reg_eip - 4);
+		reg_eax = INTR_SWAPBUFFER;
+		reg_eip = cgl.swap_isr;
+		return CBRET_NONE;
+	}
 	reg_eax = (uint32_t)(int32_t)result;
 	/* return to the caller, which removes any stack arguments itself (the variants with stack
 	 * arguments follow the C convention; register calls pass at most four) */
@@ -1247,13 +1288,16 @@ bool IsDriverName(const char *fullname) {
 bool VERITE_CglReplaceModule(DOS_File **file, const char *fullname) {
 	if (svgaCard != SVGA_Verite || !IsDriverName(fullname)) return false;
 	const Section_prop *sec = static_cast<Section_prop *>(control->GetSection("verite"));
-	if (!sec || !sec->Get_bool("verite_cgl")) return false;
+	if (!sec || strcasecmp(sec->Get_string("verite_cgl"), "hle")) return false;
 	if (!cgl.callback) {
 		cgl.callback = CALLBACK_Allocate();
 		CALLBACK_Setup(cgl.callback, &CGL_Handler, CB_RETF, "Verite CGL");
 		for (unsigned i = 0; i < CGL_FUNCS; i++) cgl.log_left[i] = 20;
 	}
 	cgl.log = sec->Get_bool("verite_debug");
+	/* a new program: forget the routine of one that ended without releasing it */
+	cgl.swap_isr = 0;
+	cgl.isr_due = cgl.in_isr = false;
 	std::vector<uint8_t> orig, img;
 	uint32_t type = 0;
 	if (!ReadWhole(*file, orig) || !BuildModule(orig, img, type)) {

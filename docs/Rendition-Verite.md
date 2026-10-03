@@ -303,8 +303,8 @@ use the Rendition BIOS. It copies a 520-word RISC loader from the board's EPROM 
 microcode for that loader to unpack. DOSBox-X has no board EPROM, and a dump would be a
 closed-source runtime component, so these titles can't run on the emulated RISC.
 
-Instead, `[verite] verite_cgl=true` (the default) gives them a built-in CGL driver
-(`src/hardware/verite_cgl.cpp`):
+Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL driver
+(`src/hardware/verite_cgl.cpp`); `off` leaves the game's own module to run on the board:
 
 - **Loading.** The games link a loader that finds `*.cgl` in their own directory, reads each
   module's header and loads the variant they were built for:
@@ -340,6 +340,11 @@ Instead, `[verite] verite_cgl=true` (the default) gives them a built-in CGL driv
     stub until the sync, so games draw no faster than the display refreshes.
     `cglCopyDisplayBuffer` (back to front) is paced the same way: at 150 frames a second,
     Hi-Octane's menus didn't react to the keyboard.
+  - `cglSetupInterrupt` for the end of a buffer swap (100h): when `cglSwapBuffer` is done,
+    the game's routine is called with the mask (in EAX and on the stack) before the call
+    returns. Flight Unlimited waits for its routine to clear a flag before it draws the next
+    frame. The vertical retrace and scanline interrupts aren't supported, because they would
+    have to interrupt the game.
   - Depth (16-bit) is kept on the host.
 - **Drawing.** `cglSendStream` takes a list of pointers to render headers:
   - **Header layout:** operation, vertex count, primitive, property mask, one 16-bit field,
@@ -382,10 +387,15 @@ Status:
   held much longer than a normal keystroke, as the software build (`HIOSW.EXE`) does too.
 - **Battle Arena Toshinden** (bonus CD upgrade): not tested; the game data isn't on the
   bonus CD.
-- **Flight Unlimited** (bonus CD): stops with DOS/4GW's "Not enough files! Please set
-  FILES=30", unrelated to CGL.
+- **Flight Unlimited** (bonus CD, `vF1.2BS`) runs: the FBO lobby in 3D, plane selection,
+  pilot log, flight with the textured terrain and instrument panel, the in-flight menus,
+  and quitting to DOS. It needs an installed setup: the CD's `HD` tree copied to a
+  writable directory, run from there (it tests its file handles by creating `test*.bin`
+  in the current directory), and a `flite.cfg` with `pile_path`, `lang_path`, `cat_path`
+  and `cd_dir`. The game builds the paths of the 3D Blaster art (`ENGPILEB`) from
+  `cd_dir`. Without it, the 2D screens come out half drawn.
 - **Not implemented:** copy streams, spans, stencil, logic operations, picking, cursors and
-  interrupts. These are logged with `verite_debug=true`, which also logs each distinct
+  the vertical retrace and scanline interrupts. These are logged with `verite_debug=true`, which also logs each distinct
   render setup and texture load.
 
 ## Microcode found in released Rendition software (brief section 6)
