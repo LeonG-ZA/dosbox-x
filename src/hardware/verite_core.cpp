@@ -436,7 +436,12 @@ void Core::PushInput(uint32_t v) {
 	}
 	in_fifo[(in_head + in_count) % IN_FIFO_SIZE] = v;
 	in_count++;
+	/* A RISC waiting for input takes the word at once: on the board it runs far ahead of the
+	 * host, so a command is done before the host does much else. Battle Race draws a pixel and
+	 * reads it straight back from local memory to learn the pixel format. */
+	const bool waiting = stalled_in;
 	stalled_in = false;
+	if (waiting && Runnable()) CatchUp();
 }
 
 uint32_t Core::PopOutput() {

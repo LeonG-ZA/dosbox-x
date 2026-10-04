@@ -115,10 +115,13 @@ Found on the way:
 - **CRTC stores from the RISC.** The modules' microcode starts by storing to the CRTC
   registers (0xffe00408..0xffe00438), which left the display blanked. On the V1000 these
   stores are taken to have no effect (see `Core::CtlWrite`).
-- **Battle Race** reaches its races, but its cockpit stays black; with `hle` it is drawn. Its
-  module builds a real-mode interrupt stub when the board's IRQ is 8 or higher and fails
-  without free conventional memory (the game takes it all), so it needs `verite_irq` below 8
-  (5 works).
+- **RISC timing.** Battle Race draws a pixel and reads it straight back from local memory to
+  learn the pixel format, and converts its cockpit with what it finds. The emulated RISC ran
+  in 1 ms slices, so the pixel wasn't drawn yet and the cockpit came out black. A RISC that
+  waits for input now takes each FIFO word as it arrives (`Core::PushInput`).
+- **Battle Race's IRQ.** Its module builds a real-mode interrupt stub when the board's IRQ is
+  8 or higher and fails without free conventional memory (the game takes it all), so it
+  needs `verite_irq` below 8 (5 works). With that it runs its races, cockpit included.
 
 Gaps in the RISC and pixel engine emulation that show up with other games are fixed in the
 core, not in the loader.
