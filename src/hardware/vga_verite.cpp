@@ -923,7 +923,16 @@ void VERITE_Destroy(Section * /*sec*/) {
  * up to 128K bytes, read by software that expects a particular board's ROM */
 void LoadBoardRom(Section_prop *section) {
 	Prop_path *pp = section ? section->Get_path("verite_bios") : NULL;
-	if (!pp || pp->realpath.empty()) return;
+	if (!pp || pp->realpath.empty()) {
+		/* no dump: DOSBox-X's own loader stands in for the board's when CGL modules run */
+		if (section && !strcasecmp(section->Get_string("verite_cgl"), "loader")) {
+			std::vector<uint8_t> rom(Verite::ROM_SIZE);
+			Verite::Core::BuildLoaderRom(rom.data(), (uint32_t)rom.size());
+			board->core->SetRom(rom.data(), (uint32_t)rom.size());
+			LOG_MSG("Verite: board ROM with DOSBox-X's loader for CGL modules");
+		}
+		return;
+	}
 	FILE *f = fopen(pp->realpath.c_str(), "rb");
 	if (!f) {
 		LOG_MSG("Verite: cannot open the BIOS file %s", pp->realpath.c_str());

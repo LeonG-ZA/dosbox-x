@@ -305,7 +305,8 @@ closed-source runtime component, so these titles can't run on the emulated RISC.
 
 Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL driver
 (`src/hardware/verite_cgl.cpp`). `off` leaves the game's own module to run on the board, and
-`bios` does the same with the board ROM from `verite_bios` (see "The game's own module" below):
+`bios` does the same with the board ROM from `verite_bios`, and `loader` with DOSBox-X's own
+loader in place of the board ROM's (see "The game's own module" below):
 
 - **Loading.** The games link a loader that finds `*.cgl` in their own directory, reads each
   module's header and loads the variant they were built for:
@@ -433,6 +434,11 @@ there and send their microcode through the FIFO. The V1000 decodes its 128K byte
 in the top 16M bytes of the RISC address space (except the memory-mapped registers), and
 `[verite] verite_bios` loads a dump of the user's own board ROM there. Without a ROM holding
 that loader the RISC runs from an empty loader. The microcode itself is in the module.
+`verite_cgl=loader` gives the board a ROM holding a stub that hands the RISC to DOSBox-X,
+which receives the microcode in place of the board's loader
+([Rendition-Verite-CGL-loader.md](Rendition-Verite-CGL-loader.md)). With it, the modules' own
+microcode runs Rebel Moon, Battle Arena Toshinden and Flight Unlimited on the emulated RISC
+and pixel engine.
 
 ## Microcode found in released Rendition software (brief section 6)
 

@@ -370,6 +370,8 @@ void Core::Reset(bool hard) {
 	riscintr = 0;
 	halted = false;
 	stalled_in = stalled_out = false;
+	loader_active = false;
+	loader_state = 0;
 	forced_valid = false;
 	forced_ir = 0;
 	step_pending = false;
@@ -771,6 +773,13 @@ bool Core::Runnable() const {
 
 uint32_t Core::Run(uint32_t cycles) {
 	uint32_t used = 0;
+	if (loader_active) {
+		LoaderPump();
+		if (loader_active) {
+			timer += cycles;
+			return cycles;
+		}
+	}
 	if (dma_busy) DmaPump();
 	/* a pending single step runs regardless of hold */
 	if (step_pending && !in_reset) {
@@ -782,13 +791,115 @@ uint32_t Core::Run(uint32_t cycles) {
 		if (cycles == 0) return used;
 	}
 	while (used < cycles) {
-		if (in_reset || halted || (debug & DEBUG_HOLDRISC)) break;
+		if (in_reset || halted || loader_active || (debug & DEBUG_HOLDRISC)) break;
 		if (dma_busy && in_count < IN_FIFO_SIZE) DmaPump();
 		if (!StepOnce()) break;
 		used++;
 	}
 	timer += used;
 	return used;
+}
+
+/* ---- board loader (docs/Rendition-Verite-CGL-loader.md) ---- */
+
+/* The stub, at ROM offset 0x10000 and copied to local memory by the module: it stores to the
+ * loader port and waits. */
+void Core::BuildLoaderRom(uint8_t *rom, uint32_t size) {
+	memset(rom, 0xFF, size);
+	static const uint32_t stub[] = {
+		0x77FEFFE0u, /* lui    ra, #0xffe0 */
+		0x4BFEFE10u, /* addsl8 ra, ra, #0x10   (ra = LOADER_PORT) */
+		0x7A0000FEu, /* sw     0(ra), zero */
+		0x00000000u, /* nop */
+		0x6C0FFE04u, /* jmp    0x3ff810 (itself, should the RISC ever get here) */
+		0x00000000u, /* nop */
+	};
+	const uint32_t at = 0x10000u;
+	if (size < at + sizeof(stub)) return;
+	for (unsigned i = 0; i < sizeof(stub) / sizeof(stub[0]); i++)
+		for (unsigned b = 0; b < 4; b++) rom[at + 4 * i + b] = (uint8_t)(stub[i] >> (24 - 8 * b));
+}
+
+void Core::LoaderBegin() {
+	loader_active = true;
+	loader_state = 0;
+	loader_have_start = false;
+	loader_words.clear();
+	Message("Verite: board loader started (RISC pc %08x)", pc);
+}
+
+/* the FIFO stream: for each section its load address, its length in words and the words;
+ * a zero address and length end it */
+void Core::LoaderPump() {
+	while (in_count && loader_active) {
+		const uint32_t v = in_fifo[in_head];
+		in_head = (in_head + 1) % IN_FIFO_SIZE;
+		in_count--;
+		switch (loader_state) {
+			case 0:
+				loader_addr = v;
+				loader_state = 1;
+				break;
+			case 1:
+				loader_left = v;
+				if (v == 0) {
+					if (loader_addr == 0) {
+						/* end of the stream: start the microcode */
+						loader_active = false;
+						pc = loader_have_start ? loader_start : 0;
+						npc = next_pc(pc);
+						halted = false;
+						Message("Verite: board loader done, microcode starts at %08x", pc);
+						return;
+					}
+					loader_state = 0;
+					break;
+				}
+				if (!loader_have_start) { loader_start = loader_addr; loader_have_start = true; }
+				loader_words.clear();
+				loader_state = 2;
+				break;
+			default:
+				loader_words.push_back(v);
+				if (--loader_left == 0) {
+					LoaderStore();
+					loader_state = 0;
+				}
+				break;
+		}
+	}
+	stalled_in = false;
+}
+
+/* Some modules scramble their microcode with a repeating 128-byte pattern. About half of the
+ * microcode's bytes are zero, so at each of the 128 positions the most common byte is the
+ * pattern's; for unscrambled microcode that is zero everywhere. A scrambled section is stored
+ * with the bytes of each word reversed, as its real loader does. */
+void Core::LoaderStore() {
+	const size_t n = loader_words.size();
+	std::vector<uint8_t> bytes(n * 4);
+	for (size_t i = 0; i < n; i++)
+		for (unsigned b = 0; b < 4; b++) bytes[4 * i + b] = (uint8_t)(loader_words[i] >> (8 * b));
+	uint8_t pattern[128];
+	bool scrambled = false;
+	for (unsigned k = 0; k < 128; k++) {
+		unsigned count[256] = {};
+		for (size_t j = k; j < bytes.size(); j += 128) count[bytes[j]]++;
+		unsigned best = 0;
+		for (unsigned c = 1; c < 256; c++) if (count[c] > count[best]) best = c;
+		pattern[k] = (uint8_t)best;
+		if (best) scrambled = true;
+	}
+	for (size_t i = 0; i < n; i++) {
+		uint32_t w = loader_words[i];
+		if (scrambled) {
+			uint8_t x[4];
+			for (unsigned b = 0; b < 4; b++) x[b] = (uint8_t)(bytes[4 * i + b] ^ pattern[(4 * i + b) & 127]);
+			w = ((uint32_t)x[0] << 24) | ((uint32_t)x[1] << 16) | ((uint32_t)x[2] << 8) | x[3];
+		}
+		Write32(loader_addr + 4 * (uint32_t)i, w);
+	}
+	Message("Verite: board loader: %u words at %08x%s", (unsigned)n, loader_addr, scrambled ? " (unscrambled)" : "");
 }
 
 /* The BIOS ROM: [SPEC] table 5 places the 128K bytes at 0xfffe0000. The V1000 decodes it in the
@@ -1015,6 +1126,10 @@ uint32_t Core::CtlRead(uint32_t a) {
 }
 
 void Core::CtlWrite(uint32_t a, uint32_t v, unsigned len) {
+	if (a == LOADER_PORT) {
+		LoaderBegin();
+		return;
+	}
 	if (ctl_log_left) { ctl_log_left--; Message("Verite ctl wr %08x = %08x/%u (pc %08x)", a, v, len, pc); }
 	if (a >= 0xFFE00400u && a < 0xFFE00800u) {
 		const uint32_t io = 0x80u + ((a - 0xFFE00400u) >> 3);

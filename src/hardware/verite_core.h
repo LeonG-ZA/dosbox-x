@@ -29,6 +29,7 @@
 #ifndef DOSBOX_VERITE_CORE_H
 #define DOSBOX_VERITE_CORE_H
 
+#include <vector>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -224,6 +225,10 @@ public:
 	void SetPciMemBase(uint32_t base) { pci_mem_base = base; }
 	void SetRom(const uint8_t *data, uint32_t size);
 	static bool IsRomAddress(uint32_t a);
+	/* DOSBox-X's board loader (docs/Rendition-Verite-CGL-loader.md): a ROM image holding the
+	 * stub that hands the RISC to LoaderPump, for use when no board ROM dump is given */
+	static void BuildLoaderRom(uint8_t *rom, uint32_t size);
+	static const uint32_t LOADER_PORT = 0xFFE01000u;
 
 	/* RISC-view memory accessors (big-endian addressing, wrapped to installed memory) */
 	uint8_t  Read8(uint32_t a) const  { return mem[(a & mem_mask) ^ BXOR]; }
@@ -297,6 +302,16 @@ private:
 	uint32_t timer;
 	uint32_t riscintr;
 	bool halted, stalled_in, stalled_out;
+
+	/* board loader: receives the microcode from the FIFO in place of the board's own */
+	bool loader_active;
+	unsigned loader_state;         /* 0 address, 1 count, 2 words */
+	uint32_t loader_addr, loader_left, loader_start;
+	bool loader_have_start;
+	std::vector<uint32_t> loader_words;
+	void LoaderBegin();
+	void LoaderPump();
+	void LoaderStore();
 	bool forced_valid;      /* host wrote the decode instruction register */
 	uint32_t forced_ir;
 	bool step_pending;

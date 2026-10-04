@@ -39,7 +39,8 @@ Screamer Rally, UEFA Euro 96), in order:
 7. **Microcode.** Writes the microcode through the input FIFO (`FIFOIn`, I/O 00h), waiting
    for `FIFOInFree` (40h): for each section the load address, the length in words and the
    words.
-8. **After the load** (to be determined, see section 6).
+8. **After the load** the module talks to its microcode directly; it needs nothing more from
+   the loader (section 6).
 
 ## 3. What the real board provides
 
@@ -82,20 +83,30 @@ VGA BIOS, so the loader has to come from DOSBox-X.
    microcode as the real loader does (section 6).
 4. **Setting.** `[verite] verite_cgl` gains `loader`. `bios` keeps using the user's ROM dump.
 
-## 6. Open questions, answered while implementing
+## 6. Answers found while implementing
 
-- How the stream ends (a terminating section, or the length of the last section) and where
-  the microcode starts (its load address, or an entry in its first words).
-- What the module waits for after the load: a value in the output FIFO, `Comm` or a memory
-  word, and what the microcode reports when it is ready.
-- Whether the loader sets up registers or memory the microcode relies on (stack, `flag`,
-  interrupt state).
+- **End of the stream:** a section with address 0 and length 0 (the module sends two zero
+  words after its sections).
+- **Start:** the microcode starts at the first section's load address (0 for every module
+  seen).
+- **Handshake:** none. Once the microcode runs, the module talks to it through the FIFOs as
+  usual.
+- **State:** the microcode needs no registers or memory set up by the loader.
 
-These are found by running a module against the stub and logging what it reads.
+## 7. Implementation
 
-## 7. Testing
+- `Verite::Core::BuildLoaderRom` builds the ROM image: 0xff everywhere and, at offset
+  0x10000, a stub that stores to `LOADER_PORT` (0xffe01000, just above the pixel engine
+  state registers) and waits.
+- The store starts the loader (`LoaderBegin`). While it runs the RISC executes nothing, and
+  `LoaderPump` takes the FIFO words on each run of the RISC; `LoaderStore` unscrambles a
+  section if needed and writes it to local memory.
+- `vga_verite.cpp` installs the image when `verite_cgl=loader` and no `verite_bios` is
+  given.
 
-- Rebel Moon, Battle Arena Toshinden, Flight Unlimited and Screamer 2 with
-  `verite_cgl=loader`, compared with `hle`.
-- After the load, the module's microcode runs on the emulated RISC and pixel engine. Gaps in
-  their emulation that show up there are fixed in the core, not in the loader.
+## 8. Testing
+
+With `verite_cgl=loader`, the module's own microcode draws Rebel Moon's title screen and
+gameplay, Battle Arena Toshinden's fights and Flight Unlimited's flight. Gaps in the RISC and
+pixel engine emulation that show up with other games are fixed in the core, not in the
+loader.
