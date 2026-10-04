@@ -437,8 +437,9 @@ that loader the RISC runs from an empty loader. The microcode itself is in the m
 `verite_cgl=loader` gives the board a ROM holding a stub that hands the RISC to DOSBox-X,
 which receives the microcode in place of the board's loader
 ([Rendition-Verite-CGL-loader.md](Rendition-Verite-CGL-loader.md)). With it, the modules' own
-microcode runs Rebel Moon, Battle Arena Toshinden and Flight Unlimited on the emulated RISC
-and pixel engine.
+microcode runs Rebel Moon, Battle Arena Toshinden, Flight Unlimited, Hi-Octane, Screamer 2,
+Screamer Rally, UEFA Euro 96 and Actua Soccer on the emulated RISC and pixel engine. Battle
+Race needs `verite_irq` below 8 with the game's own module, and its cockpit stays black.
 
 ## Microcode found in released Rendition software (brief section 6)
 

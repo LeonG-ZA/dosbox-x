@@ -106,7 +106,19 @@ VGA BIOS, so the loader has to come from DOSBox-X.
 
 ## 8. Testing
 
-With `verite_cgl=loader`, the module's own microcode draws Rebel Moon's title screen and
-gameplay, Battle Arena Toshinden's fights and Flight Unlimited's flight. Gaps in the RISC and
-pixel engine emulation that show up with other games are fixed in the core, not in the
-loader.
+With `verite_cgl=loader` the modules' own microcode runs Rebel Moon, Battle Arena Toshinden,
+Flight Unlimited, Hi-Octane, Screamer 2, Screamer Rally, UEFA Euro 96 and Actua Soccer. The
+older modules (Actua Soccer's) load their unscrambled microcode into local memory themselves
+and need no loader; they run the same way.
+
+Found on the way:
+- **CRTC stores from the RISC.** The modules' microcode starts by storing to the CRTC
+  registers (0xffe00408..0xffe00438), which left the display blanked. On the V1000 these
+  stores are taken to have no effect (see `Core::CtlWrite`).
+- **Battle Race** reaches its races, but its cockpit stays black; with `hle` it is drawn. Its
+  module builds a real-mode interrupt stub when the board's IRQ is 8 or higher and fails
+  without free conventional memory (the game takes it all), so it needs `verite_irq` below 8
+  (5 works).
+
+Gaps in the RISC and pixel engine emulation that show up with other games are fixed in the
+core, not in the loader.

@@ -1133,6 +1133,12 @@ void Core::CtlWrite(uint32_t a, uint32_t v, unsigned len) {
 	if (ctl_log_left) { ctl_log_left--; Message("Verite ctl wr %08x = %08x/%u (pc %08x)", a, v, len, pc); }
 	if (a >= 0xFFE00400u && a < 0xFFE00800u) {
 		const uint32_t io = 0x80u + ((a - 0xFFE00400u) >> 3);
+		/* V1000 microcode flips the frame bases and polls CRTCCtl's status bits, as Speedy3D does.
+		 * The microcode of Creative's CGL modules also starts by storing to 0xffe00408..0xffe00438,
+		 * which would leave CRTCCtl blanked, yet on the board the display stays as the host set it
+		 * up (Actua Soccer sets its mode before starting the microcode). So RISC stores to CRTCCtl
+		 * and the timing registers are taken to have no effect on the V1000. */
+		if (chip == CHIP_V1000 && io < 0x90) return;
 		/* RAMDAC registers are bytes, except that a word write to the palette data register
 		 * stores a whole RGB triple ([SPEC] 7) */
 		const bool dac = io >= 0xB0 && io < 0xC0;
