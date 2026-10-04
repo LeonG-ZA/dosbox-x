@@ -919,6 +919,27 @@ void VERITE_Destroy(Section * /*sec*/) {
 	PAGING_ClearTLB();
 }
 
+/* The board's ROM as the RISC sees it (0xfffe0000 up): a dump of the user's own board EPROM,
+ * up to 128K bytes, read by software that expects a particular board's ROM */
+void LoadBoardRom(Section_prop *section) {
+	Prop_path *pp = section ? section->Get_path("verite_bios") : NULL;
+	if (!pp || pp->realpath.empty()) return;
+	FILE *f = fopen(pp->realpath.c_str(), "rb");
+	if (!f) {
+		LOG_MSG("Verite: cannot open the BIOS file %s", pp->realpath.c_str());
+		return;
+	}
+	std::vector<uint8_t> rom(Verite::ROM_SIZE + 1);
+	const size_t n = fread(rom.data(), 1, rom.size(), f);
+	fclose(f);
+	if (n == 0 || n > Verite::ROM_SIZE) {
+		LOG_MSG("Verite: %s is not a BIOS image of up to 128K bytes; ignored", pp->realpath.c_str());
+		return;
+	}
+	board->core->SetRom(rom.data(), (uint32_t)n);
+	LOG_MSG("Verite: board ROM loaded from %s (%u bytes)", pp->realpath.c_str(), (unsigned)n);
+}
+
 void InstallBoard() {
 	if (svgaCard != SVGA_Verite || board) return;
 	if (!pcibus_enable) {
@@ -935,6 +956,7 @@ void InstallBoard() {
 	if (board->trace_left > 0) board->core->ctl_log_left = (unsigned)board->trace_left;
 	const int mhz = section ? section->Get_int("verite_risc_mhz") : 25;
 	board->risc_hz = (mhz > 0 ? mhz : 25) * 1e6;
+	LoadBoardRom(section);
 
 	pci_dev = new PCI_VeriteDevice(board->irq, mem, DEFAULT_IO_BASE);
 	Bits slot = 1;

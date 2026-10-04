@@ -3542,11 +3542,16 @@ void DOSBOX_SetupConfigSections(void) {
     Pint->Set_help("Log this many host accesses to the Verite (I/O registers and PCI configuration), and as many RISC\n"
                    "accesses to its control registers, for troubleshooting.");
 
-    const char* verite_cgl_modes[] = { "hle", "off", nullptr };
+    Pstring = secprop->Add_path("verite_bios",Property::Changeable::OnlyAtStart,"");
+    Pstring->Set_help("A dump of your own Verite board's BIOS ROM (up to 128K bytes). The board's RISC sees it at its ROM\n"
+                    "address, as on the real board; some board makers' drivers read their board's ROM there.");
+
+    const char* verite_cgl_modes[] = { "hle", "bios", "off", nullptr };
     Pstring = secprop->Add_string("verite_cgl",Property::Changeable::WhenIdle,"hle");
     Pstring->Set_values(verite_cgl_modes);
     Pstring->Set_help("How games written for Creative's CGL on the 3D Blaster PCI are run.\n"
                       "  hle: when a game loads one of its Verite CGL driver modules (VRIT*.CGL), DOSBox-X handles the calls.\n"
+                      "  bios: the game's own module runs on the emulated board, with the board ROM from verite_bios.\n"
                       "  off: the game's own module runs on the emulated board.");
 
     secprop=control->AddSection_prop("mixer",&Null_Init);

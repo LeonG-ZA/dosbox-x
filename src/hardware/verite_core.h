@@ -223,6 +223,7 @@ public:
 	/* Board hooks */
 	void SetPciMemBase(uint32_t base) { pci_mem_base = base; }
 	void SetRom(const uint8_t *data, uint32_t size);
+	static bool IsRomAddress(uint32_t a);
 
 	/* RISC-view memory accessors (big-endian addressing, wrapped to installed memory) */
 	uint8_t  Read8(uint32_t a) const  { return mem[(a & mem_mask) ^ BXOR]; }

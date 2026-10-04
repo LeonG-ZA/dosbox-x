@@ -43,6 +43,7 @@
 #include "cpu.h"
 #include "dos_inc.h"
 #include "dos_system.h"
+#include "inout.h"
 #include "logging.h"
 #include "mem.h"
 #include "paging.h"
@@ -125,6 +126,15 @@ struct CglState {
 	bool isr_due = false;             /* call it before the current call returns */
 	bool in_isr = false;              /* it runs; the stub finishes the call when it returns */
 	int16_t isr_result = 0;
+	/* the vertical retrace routine, called between instructions as an interrupt would be */
+	uint32_t retrace_isr = 0;
+	uint16_t retrace_cs = 0;          /* the game's code selector */
+	uint32_t resume_stub = 0;         /* a stub the routine returns to (cglSetupInterrupt's own) */
+	bool in_retrace = false;
+	bool retrace_armed = false;       /* the event polling for vertical syncs runs */
+	uint64_t retrace_frame = 0;
+	uint32_t saved[9] = {};           /* EAX ECX EDX EBX ESP EBP ESI EDI EFLAGS */
+	uint32_t saved_eip = 0;
 	unsigned log_left[CGL_FUNCS] = {};
 };
 CglState cgl;
@@ -363,7 +373,7 @@ enum : int16_t {
 	ERR_MUST_INIT_SCREEN = 32000
 };
 enum { OP_RENDER = 1, OP_COPY = 2 };
-const uint32_t INTR_SWAPBUFFER = 0x0100;
+const uint32_t INTR_VRETRACE = 0x0001, INTR_SWAPBUFFER = 0x0100;
 enum {
 	PRIM_POINT = 0x000, PRIM_LINE = 0x100, PRIM_LINE_STRIP = 0x101, PRIM_LINE_LOOP = 0x102,
 	PRIM_TRIANGLE = 0x200, PRIM_TRIANGLE_STRIP = 0x201, PRIM_TRIANGLE_FAN = 0x202,
@@ -609,6 +619,23 @@ void Fragment(const Prim &p, int x, int y, const float *a) {
 	}
 	const float *col = (p.mask & PROP_SHADE) ? a : p.flat;
 	int r = (int)col[A_R], g = (int)col[A_G], b = (int)col[A_B], al = (int)col[A_A];
+	if (p.has_tex && p.tex.fmt == FMT_CI8 && rs.scr.format == FMT_CI8) {
+		/* colour index screen and texture: the texel's index is the pixel, unfiltered */
+		float u = a[A_S], v = a[A_T];
+		if (p.mask & PROP_PERSPECTIVE) {
+			const float q = a[A_Q];
+			if (q != 0.0f) { u /= q; v /= q; }
+		}
+		const int tu = Wrap((int)floorf(u), p.tex.width, p.tex.swrap);
+		const int tv = Wrap((int)floorf(v), p.tex.height, p.tex.twrap);
+		const uint8_t index = Card()->Read8(p.tex.addr + (uint32_t)tv * p.tex.stride + (uint32_t)tu);
+		uint8_t t[4];
+		DecodePixel(index, FMT_CI8, p.tex.bgr, t);
+		if (Transparent(p.tex, t)) return;
+		PutScreenPixel(p.target, x, y, index, 0, 0, 255);
+		if (dz && p.depth_write) *dz = (uint16_t)z;
+		return;
+	}
 	if (p.has_tex) {
 		float u = a[A_S], v = a[A_T];
 		if (p.mask & PROP_PERSPECTIVE) {
@@ -1089,6 +1116,28 @@ void SyncPending() {
 	cgl.waiting = false;
 }
 
+/* Once a millisecond while a retrace routine is installed: after each vertical sync, call it
+ * when the game runs its own code with interrupts enabled, saving every register; it returns
+ * to cglSetupInterrupt's stub, whose handler restores them (CGL_Handler). */
+void RetraceTick(Bitu) {
+	if (!cgl.retrace_isr) { cgl.retrace_armed = false; return; }
+	PIC_AddEvent(RetraceTick, 1.0);
+	const uint64_t frame = VERITE_FrameCount();
+	if (frame == cgl.retrace_frame || cgl.in_retrace || cgl.in_isr) return;
+	if (!cpu.pmode || (reg_flags & FLAG_VM) || !(reg_flags & FLAG_IF) || SegValue(cs) != cgl.retrace_cs) return;
+	cgl.retrace_frame = frame;
+	cgl.in_retrace = true;
+	const uint32_t r[9] = { reg_eax, reg_ecx, reg_edx, reg_ebx, reg_esp, reg_ebp, reg_esi, reg_edi, (uint32_t)reg_flags };
+	memcpy(cgl.saved, r, sizeof(r));
+	cgl.saved_eip = reg_eip;
+	reg_esp -= 4;
+	mem_writed(SegPhys(ss) + reg_esp, INTR_VRETRACE);
+	reg_esp -= 4;
+	mem_writed(SegPhys(ss) + reg_esp, cgl.resume_stub);
+	reg_eax = INTR_VRETRACE;
+	reg_eip = cgl.retrace_isr;
+}
+
 int16_t Call(unsigned f) {
 	Screen &s = rs.scr;
 	const char *name = cgl_funcs[f].name;
@@ -1138,14 +1187,25 @@ int16_t Call(unsigned f) {
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglSetupInterrupt") || !strcmp(name, "cglReleaseInterrupt")) {
-		/* only the end of a buffer swap is reported; the vertical retrace and scanline ones
-		 * would have to interrupt the game */
-		const uint32_t mask = Arg(0);
-		if (mask & ~INTR_SWAPBUFFER) {
-			if (rs.unknown_log < 40) { rs.unknown_log++; LOG_MSG("CGL: interrupt %x is not supported", mask & ~INTR_SWAPBUFFER); }
-			if (name[3] == 'S') return ERR_INSTALL_INTERRUPT_FAILED;
+		/* the end of a buffer swap is reported when the swap returns; the vertical retrace
+		 * interrupts the game (RetraceTick); scanline interrupts aren't supported */
+		const uint32_t mask = Arg(0), known = INTR_SWAPBUFFER | INTR_VRETRACE;
+		const bool setup = name[3] == 'S';
+		if (mask & ~known) {
+			if (rs.unknown_log < 40) { rs.unknown_log++; LOG_MSG("CGL: interrupt %x is not supported", mask & ~known); }
+			if (setup) return ERR_INSTALL_INTERRUPT_FAILED;
 		}
-		if (mask & INTR_SWAPBUFFER) cgl.swap_isr = name[3] == 'S' ? Arg(1) : 0;
+		if (mask & INTR_SWAPBUFFER) cgl.swap_isr = setup ? Arg(1) : 0;
+		if (mask & INTR_VRETRACE) {
+			cgl.retrace_isr = setup ? Arg(1) : 0;
+			cgl.retrace_cs = (uint16_t)SegValue(cs);
+			cgl.resume_stub = reg_eip - 4;
+			cgl.retrace_frame = VERITE_FrameCount();
+			if (cgl.retrace_isr && !cgl.retrace_armed) {
+				cgl.retrace_armed = true;
+				PIC_AddEvent(RetraceTick, 1.0);
+			}
+		}
 		return ERR_NONE;
 	}
 	if (!strcmp(name, "cglSelectRenderBuffer")) {
@@ -1208,7 +1268,14 @@ int16_t Call(unsigned f) {
 		const unsigned first = Arg(1) & 0xFFFF, count = Arg(2) & 0xFFFF;
 		for (unsigned i = 0; i < count && first + i < 256; i++) {
 			if (name[3] == 'S') {
-				rs.palette[first + i] = ((uint32_t)Rd8(colors, 4 * i + 2) << 16) | ((uint32_t)Rd8(colors, 4 * i + 1) << 8) | Rd8(colors, 4 * i);
+				const uint8_t r = Rd8(colors, 4 * i + 2), g = Rd8(colors, 4 * i + 1), b = Rd8(colors, 4 * i);
+				rs.palette[first + i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+				/* the display of a colour index screen goes through the RAMDAC's palette */
+				const unsigned shift = vga.dac.bits == 8 ? 0 : 2;
+				IO_WriteB(0x3C8, (uint8_t)(first + i));
+				IO_WriteB(0x3C9, (uint8_t)(r >> shift));
+				IO_WriteB(0x3C9, (uint8_t)(g >> shift));
+				IO_WriteB(0x3C9, (uint8_t)(b >> shift));
 			}
 			else {
 				const uint32_t v = rs.palette[first + i];
@@ -1245,6 +1312,15 @@ Bitu CGL_Handler(void) {
 	const uint8_t f = mem_readb(SegPhys(cs) + reg_eip);
 	cgl.type = mem_readb(SegPhys(cs) + reg_eip + 1) & 3;
 	card = VERITE_GetCore();
+	if (cgl.in_retrace && reg_eip - 4 == cgl.resume_stub) {
+		/* back from the retrace routine: continue where the game was interrupted */
+		cgl.in_retrace = false;
+		reg_eax = cgl.saved[0]; reg_ecx = cgl.saved[1]; reg_edx = cgl.saved[2]; reg_ebx = cgl.saved[3];
+		reg_esp = cgl.saved[4]; reg_ebp = cgl.saved[5]; reg_esi = cgl.saved[6]; reg_edi = cgl.saved[7];
+		CPU_SetFlags(cgl.saved[8], FMASK_ALL);
+		reg_eip = cgl.saved_eip;
+		return CBRET_NONE;
+	}
 	if (cgl.in_isr) {
 		/* back from the game's interrupt routine: drop its argument and finish the call */
 		cgl.in_isr = false;
@@ -1309,8 +1385,8 @@ bool VERITE_CglReplaceModule(DOS_File **file, const char *fullname) {
 	}
 	cgl.log = sec->Get_bool("verite_debug");
 	/* a new program: forget the routine of one that ended without releasing it */
-	cgl.swap_isr = 0;
-	cgl.isr_due = cgl.in_isr = false;
+	cgl.swap_isr = cgl.retrace_isr = 0;
+	cgl.isr_due = cgl.in_isr = cgl.in_retrace = false;
 	std::vector<uint8_t> orig, img;
 	uint32_t type = 0;
 	if (!ReadWhole(*file, orig) || !BuildModule(orig, img, type)) {

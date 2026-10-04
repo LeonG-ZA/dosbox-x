@@ -304,7 +304,8 @@ microcode for that loader to unpack. DOSBox-X has no board EPROM, and a dump wou
 closed-source runtime component, so these titles can't run on the emulated RISC.
 
 Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL driver
-(`src/hardware/verite_cgl.cpp`); `off` leaves the game's own module to run on the board:
+(`src/hardware/verite_cgl.cpp`). `off` leaves the game's own module to run on the board, and
+`bios` does the same with the board ROM from `verite_bios` (see "The game's own module" below):
 
 - **Loading.** The games link a loader that finds `*.cgl` in their own directory, reads each
   module's header and loads the variant they were built for:
@@ -343,8 +344,11 @@ Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL drive
   - `cglSetupInterrupt` for the end of a buffer swap (100h): when `cglSwapBuffer` is done,
     the game's routine is called with the mask (in EAX and on the stack) before the call
     returns. Flight Unlimited waits for its routine to clear a flag before it draws the next
-    frame. The vertical retrace and scanline interrupts aren't supported, because they would
-    have to interrupt the game.
+    frame.
+  - The vertical retrace interrupt (1): after each vertical sync, when the game runs its own
+    code with interrupts enabled, its routine is called as an interrupt would call it, and
+    the game continues where it was with all registers and flags restored. Battle Race
+    installs one and waits for it. Scanline interrupts aren't supported.
   - Depth (16-bit) is kept on the host.
 - **Drawing.** `cglSendStream` takes a list of pointers to render headers:
   - **Header layout:** operation, vertex count, primitive, property mask, one 16-bit field,
@@ -364,6 +368,9 @@ Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL drive
     "Blending" option in its Renderer menu is on (it is off by default).
   - **Also supported:** depth test, depth cue and constant alpha blending.
   - Hi-Octane sets property bits above 200h on some quads (F800h, FC00h); they are ignored.
+  - **Colour index screens** (format 14): a colour index texture writes its texel's index
+    unchanged, without filtering, and an untextured primitive writes its red component as
+    the index. `cglSetPalette` also loads the RAMDAC palette, which the display reads.
 - **Textures.**
   - Addresses count from the start of texture memory, which begins 64KB after the frame
     buffers: Hi-Octane addresses its staging rows from about 32KB below address 0.
@@ -388,8 +395,26 @@ Status:
   most of its 2D graphics (menu backgrounds, text) straight into it and into the back buffer
   through `cglLockBuffer`. Its menus read the keyboard state once a frame and miss presses
   held much longer than a normal keystroke, as the software build (`HIOSW.EXE`) does too.
-- **Battle Arena Toshinden** (bonus CD upgrade): not tested; the game data isn't on the
-  bonus CD.
+- **Battle Arena Toshinden** (v2.0 with the 3D Blaster PCI upgrade `TSDUPGRD`: `TSD.EXE`
+  and `VRITB170.CGL`) runs: menus and fights with the 3D stages, shaded fighters, shadows
+  and HUD. Its CD check reads the disc's track table and wants at least 16 tracks: track 2
+  190 to 200 seconds long and track 16 10 to 15 seconds long. A CD image without the audio
+  tracks gives "NO CD DETECTED", which allows only network play.
+- **Actua Soccer** (3D Blaster CD version, `SOC3DB.EXE` from the `SOC3DB` patch) and
+  **UEFA Euro 96 England** (`EUROBLST.EXE` with the patch's `VRITB170.CGL`) run matches in
+  8-bit colour index mode: Actua at 640×400, Euro 96 at 800×600. Their menus are VESA
+  graphics drawn by the game. Actua's installer stops with "Divide error" at
+  `cycles=max`; it installs with fixed cycles.
+- **Screamer 2** (Italian 3D patch, `S2_3DBL.EXE` at 320×200) and **Screamer Rally**
+  (`STRT3DBL.EXE`) run menus and races, with `HOTCGL` pointing at their `HOTCGL`
+  directory. Screamer 2's high resolution build (`S2_3DBH.EXE`, 640×400) was tested as far
+  as its menus.
+- **Battle Race** (Ikarion, with the 1.01 patch) plays its intro movie and reaches the main
+  menu at 640×400; the races are not tested yet. It ships no Vérité module, only the VLB 3D
+  Blaster's `GIGTB163.CGL`, so `VRITB170.CGL` from another game has to be added. Its SETUP
+  doesn't react to input in DOSBox-X (it does in MS-DOS mode of a real Windows 98
+  installation); a `SYSTEM.CFG` saved there selects the CGL drivers. One OEM edition is
+  tied to the ELSA Victory 3D ("This is an ELSA Victory 3D version only").
 - **Flight Unlimited** (bonus CD, `vF1.2BS`) runs: the FBO lobby in 3D, plane selection,
   pilot log, flight with the textured terrain and instrument panel, the in-flight menus,
   and quitting to DOS. It needs an installed setup: the CD's `HD` tree copied to a
@@ -398,8 +423,16 @@ Status:
   and `cd_dir`. The game builds the paths of the 3D Blaster art (`ENGPILEB`) from
   `cd_dir`. Without it, the 2D screens come out half drawn.
 - **Not implemented:** copy streams, spans, stencil, logic operations, picking, cursors and
-  the vertical retrace and scanline interrupts. These are logged with `verite_debug=true`, which also logs each distinct
-  render setup and texture load.
+  scanline interrupts. These are logged with `verite_debug=true`, which also logs each
+  distinct render setup and texture load.
+
+The game's own module (`verite_cgl=off` or `bios`): the 1.70 modules start the board by
+stepping the RISC through its debug registers, copy a 2K byte RISC loader from the board ROM
+(RISC address 0xfff10000, ROM offset 0x10000) to local memory at 0x3ff800, start the RISC
+there and send their microcode through the FIFO. The V1000 decodes its 128K byte ROM, mirrored,
+in the top 16M bytes of the RISC address space (except the memory-mapped registers), and
+`[verite] verite_bios` loads a dump of the user's own board ROM there. Without a ROM holding
+that loader the RISC runs from an empty loader. The microcode itself is in the module.
 
 ## Microcode found in released Rendition software (brief section 6)
 

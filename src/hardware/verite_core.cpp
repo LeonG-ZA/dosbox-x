@@ -791,9 +791,16 @@ uint32_t Core::Run(uint32_t cycles) {
 	return used;
 }
 
+/* The BIOS ROM: [SPEC] table 5 places the 128K bytes at 0xfffe0000. The V1000 decodes it in the
+ * whole top 16M bytes, mirrored, except for the memory-mapped registers: Creative's CGL modules
+ * copy a RISC loader from 0xfff10000 (ROM offset 0x10000). */
+bool Core::IsRomAddress(uint32_t a) {
+	return a >= 0xFF000000u && !(a >= 0xFFE00000u && a < 0xFFE01000u);
+}
+
 uint32_t Core::Fetch(uint32_t a) {
 	if (a < 0x01000000u) return Read32(a);
-	if (a >= 0xFFFE0000u) {
+	if (IsRomAddress(a)) {
 		const uint32_t o = a & (ROM_SIZE - 4);
 		return ((uint32_t)rom[o] << 24) | ((uint32_t)rom[o + 1] << 16) | ((uint32_t)rom[o + 2] << 8) | rom[o + 3];
 	}
@@ -1022,7 +1029,7 @@ void Core::CtlWrite(uint32_t a, uint32_t v, unsigned len) {
 
 uint32_t Core::LoadWord(uint32_t a) {
 	if (a < 0x01000000u) return Read32(a);
-	if (a >= 0xFFFE0000u) return Fetch(a & ~3u);
+	if (IsRomAddress(a)) return Fetch(a & ~3u);
 	return CtlRead(a & ~3u);
 }
 
