@@ -176,3 +176,40 @@ the x86 (e.g. `MoveEntity`, `HandleGameOver` in SFL.SYM). [confirmed]
 | Format/control card ×2 | I/O 0x210/0x218, mem 0xE0000/0xE0800 | `CTRLI_FCD_*` | buttons, joystick, flexor, credits, lights, Visette brightness, volume, mic, security |
 | Network | I/O 0x280, mem 0xC8000, IRQ 5 | `NET_*` | multi-player linking |
 | Soundscape ×2 | 0x330 IRQ 12, 0x350 IRQ 7 | `SND_*` | firmware `SNDSCAPE.COD` uploaded by host |
+
+## 9. Board side (what the 88110s see) — from MAINA/MAINB, confirmed by running them
+
+| Physical address | Use | Evidence | Confidence |
+|---|---|---|---|
+| 0x00000000–0x00FFFFFF | shared DRAM (both CPUs and the host window) | COFF section addresses, upload trace | [confirmed] |
+| 0x10000000 + a | uncached alias of DRAM `a` (data BATC entry `0x10000039`) | `mainA` 0x4a708 | [confirmed by running] |
+| 0x20000006 | FIFO data, 16-bit read pops one word | `waitWordFIFO`, `readWordFIFO` | [confirmed] |
+| 0x30000000 | status: bit 29 = FIFO not empty; bits 10..1 = current video line; bits 28..25 printed as card number | `waitWordFIFO`, `waitVBI`, `mainA` banner | [confirmed] / card id [inferred] |
+| 0x30000006 | 16-bit control (written by host reset and by `mainB`) | | [confirmed write] |
+| 0x40000000–0x403FFFFF | VRAM, 4 MB; frame buffers at 0x40000000 and 0x4006C000 (DN2), palettes at 0x403FC000 | `mainB` clear loop, display pointer 0x200C | [confirmed] |
+| 0x48xxxxxx / 0x49xxxxxx (read) | VRAM read transfer: load the 8 KB row at xxxxxx into the serial access memory | `swapBuffersFLIC` / clear code (DN2 0x4d2d0–0x4d380) | [inferred from usage; confirmed by output] |
+| 0x4Fxxxxxx (write) | VRAM write transfer: store the SAM into row xxxxxx under a bit mask (the written value) | same | [inferred; confirmed by output] |
+
+Shared globals (both CPUs set r30 = 0x10007000, i.e. physical 0x7000):
+
+| Offset | Use |
+|---|---|
+| +0x38 | current draw buffer (VRAM address) |
+| +0x40 | line stride in bytes (1536 = 768 × 16-bit pixels in DN2) |
+| +0x50 | buffer size in 8 KB VRAM rows |
+| +0xC8 / +0xCC | front / back buffer |
+| +0x100 | **draw-list hand-off**: A stores the list address, B renders it and writes 0 |
+| +0x238, +0x240, +0x48, +0x4C | floating-point constants used by the rasteriser (span step, numerator, screen centre) |
+
+Mailboxes in low DRAM: 0x2004–0x2020 video set-up (0x200C = displayed buffer, 0x2020 = VBI line window),
+0x2100/0x2102 CPU ready, 0x2104 channel configuration from the host (bit 9 = 16-bit pixels), 0x2108–0x2150 status and
+load counters.
+
+Pixel formats: 32-bit 0x00RRGGBB; 16-bit 4:4:4:4 with R in bits 11..8, G 7..4, B 3..0 (from `CmdScreenClearMode`'s
+`punpk.b / prot / ppack.16.h` conversion). [inferred; colours look right in DN2]
+
+### CPU A → CPU B draw lists
+
+A builds a list of records in DRAM and hands it to B through global +0x100. Each record starts with an 8-byte header whose signed
+top byte is the record type (0 = end of list). `draw32B`/`draw16B` jump through a 56-entry table. Most primitives come in triples
+(full set-up, new right edge, new left edge). See `findings/drawlist.md`.
