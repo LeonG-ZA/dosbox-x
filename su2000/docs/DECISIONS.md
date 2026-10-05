@@ -2,7 +2,7 @@
 
 ## Gate 1 — how do the games drive the PIX 1000?  (2026-10-05)
 
-**Status: proposed. Waiting for the user's confirmation before starting Milestone 2.**
+**Status: decided 2026-10-05 by the user: hybrid (see Gate 1 outcome below).**
 
 ### Findings
 
@@ -48,3 +48,24 @@ Milestone 2B design if HLE geometry fidelity proves hard.
 * Answers to brief §8: the C800–E0FF hole = NET (C8000) + PIX window (D0000–DFFFF) + format cards (E0000/E0800).
   The board has **no program ROM dependency**: both CPUs' code is uploaded. A VGA attendant/operator display exists:
   ETS and SP switch the VGA into graphics mode, and DN2 prints its banner on VGA text.
+
+### Gate 1 outcome (user decision)
+
+The user chose the **hybrid**: emulate CPU A (geometry) at instruction level, and replace the rasteriser (CPU B) with HLE.
+The SFL start-up failure was to be attempted without spending too long on it.
+
+Implementation notes (details in `findings/m88110_core.md`):
+
+* CPU A runs the real MAINA in a new MC88110 interpreter. CPU B also runs MAINB for its set-up and idle loop, but each draw-list
+  record is offered to the HLE first (`pixraster.cpp`). Unimplemented records fall back to the interpreter, so the output is
+  always the firmware's.
+* Not done: an automatic translation of B's handlers into C++. That would be decompiled firmware and must not be published
+  (brief §7). HLE handlers are written from the record semantics and checked against the interpreter with
+  `run_pix --compare N`.
+
+### SFL start-up (time-boxed, not solved)
+
+`SFL.EXE` exits with "Not enough memory to allocate file structures": the Watcom runtime's `malloc(8)` fails in start-up
+(image 0x91214). The heap-grow path checks the runtime's extender-type byte `[0xC727E]` and calls `0x8F961`/`0x8FA10`. The
+flag `[0xC8554]` is 1 and never cleared. Unchanged with memsize 4–64 MB, `xms=false`, `umb=true` and `DOS4GVM=1`. The next
+step would be tracing DOS/4GW's DPMI calls in a DOSBox-X debugger build. Left open by the time box.

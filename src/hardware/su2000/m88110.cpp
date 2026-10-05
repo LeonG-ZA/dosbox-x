@@ -500,20 +500,24 @@ void M88110::execute(uint32_t inst, Decoded d) {
         break;
     }
     case OP_PPACK_8: case OP_PPACK_16: case OP_PPACK_16_H: case OP_PPACK_32: case OP_PPACK_32_B: case OP_PPACK_32_H: {
-        /* pack: take the high-order R bits of each T-sized field of the 64-bit rS2 and pack them into the 32-bit
-         * result, shifting rS1 left to make room [inferred] */
+        /* pack: the high-order (R / fields) bits of each T-sized field of the 64-bit rS2 pair form an R-bit value;
+         * the 64-bit rS1 pair is shifted left by R and the packed value inserted below; result in the rD pair.
+         * (Firmware always consumes rD+1, and chains two ppack.32 to fill a pair before st.d.) */
         const unsigned rbits = d.op == OP_PPACK_8 ? 8 : (d.op == OP_PPACK_16 || d.op == OP_PPACK_16_H) ? 16 : 32;
         const unsigned t = (inst >> 5) & 3;
         const unsigned fbits = t == 1 ? 8 : t == 2 ? 16 : 32;
+        const uint64_t a = ((uint64_t)r[rs1] << 32) | r[(rs1 + 1) & 31];
         const uint64_t b = ((uint64_t)r[rs2] << 32) | r[(rs2 + 1) & 31];
         const unsigned nf = 64 / fbits;
         const unsigned per = rbits / nf;
-        uint32_t packed = 0;
+        uint64_t packed = 0;
         for (unsigned i = 0; i < nf; i++) {
             const uint64_t field = (b >> (i * fbits)) & (fbits == 64 ? ~0ull : ((1ull << fbits) - 1));
-            packed |= (uint32_t)((field >> (fbits - per)) & ((1ull << per) - 1)) << (i * per);
+            packed |= ((field >> (fbits - per)) & ((1ull << per) - 1)) << (i * per);
         }
-        D = rbits == 32 ? packed : ((S1 << rbits) | packed);
+        const uint64_t out = (a << rbits) | packed;
+        D = (uint32_t)(out >> 32);
+        r[(rd + 1) & 31] = (uint32_t)out;
         break;
     }
     case OP_PROT: {
