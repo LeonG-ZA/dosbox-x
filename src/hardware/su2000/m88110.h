@@ -26,6 +26,9 @@ public:
     virtual void     wr32(uint32_t pa, uint32_t v) = 0;
     /* Instruction fetch; may be served from a fast pointer. */
     virtual uint32_t fetch(uint32_t pa) { return rd32(pa); }
+    /* Optional direct mapping of plain memory, per 4 MB physical region (index pa >> 22).
+     * NULL entries go through the virtual accessors. */
+    uint8_t *fast[1024] = {};
 };
 
 class M88110 {
@@ -56,12 +59,14 @@ public:
     std::string disasm(uint32_t inst, uint32_t at) const;
 
     /* Memory helpers using the data BATC translation */
-    uint32_t xlate(uint32_t va) const;
+    uint32_t xlate(uint32_t va) const { const uint32_t t = batc_tab[va >> 19]; return t ? (t & 0xFFF80000u) | (va & 0x7FFFFu) : va; }
+    void     rebuild_batc();
+    uint32_t batc_tab[8192];    /* per 512 KB logical block: physical base | 1, or 0 = untranslated */
     uint32_t rd32v(uint32_t va) { return bus->rd32(xlate(va)); }
 
 private:
     M88110Bus *bus;
-    struct Decoded { uint16_t op; uint8_t mode; };
+    struct Decoded { uint16_t op; uint8_t mode; uint8_t fk, td, t1, t2; };
     std::vector<uint32_t> dcache_tag;
     std::vector<Decoded> dcache;
     Decoded decode(uint32_t inst);

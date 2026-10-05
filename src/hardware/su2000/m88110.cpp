@@ -37,6 +37,22 @@ const TableEntry table[] = {
 /* FP operand size letters in mnemonics like "fadd.dsx": index 0 = destination, 1 = S1, 2 = S2 */
 uint8_t fsz(char c) { return c == 's' ? 0 : c == 'd' ? 1 : 2; }
 
+enum FpKind : uint8_t { FK_NONE, FK_ADD, FK_SUB, FK_MUL, FK_DIV, FK_SQRT, FK_CMP, FK_FLT, FK_INT, FK_NINT, FK_TRNC, FK_CVT, FK_MOV };
+FpKind fp_kind(const char *n) {
+    if (!strncmp(n, "fadd", 4)) return FK_ADD;
+    if (!strncmp(n, "fsub", 4)) return FK_SUB;
+    if (!strncmp(n, "fmul", 4)) return FK_MUL;
+    if (!strncmp(n, "fdiv", 4)) return FK_DIV;
+    if (!strncmp(n, "fsqrt", 5)) return FK_SQRT;
+    if (!strncmp(n, "fcmp", 4)) return FK_CMP;
+    if (!strncmp(n, "flt.", 4)) return FK_FLT;
+    if (!strncmp(n, "int.", 4)) return FK_INT;
+    if (!strncmp(n, "nint.", 5)) return FK_NINT;
+    if (!strncmp(n, "trnc.", 5)) return FK_TRNC;
+    if (!strncmp(n, "fcvt.", 5)) return FK_CVT;
+    if (!strncmp(n, "mov", 3)) return FK_MOV;
+    return FK_NONE;
+}
 struct FpSizes { uint8_t td, t1, t2; };
 FpSizes fp_sizes[OP_COUNT];
 bool fp_sizes_init = false;
@@ -80,7 +96,7 @@ M88110::M88110(M88110Bus *b) : bus(b) {
     trace = false;
     bp[0] = bp[1] = bp[2] = bp[3] = 0xFFFFFFFFu;
     dcache_tag.assign(1u << 16, 0xFFFFFFFFu);
-    dcache.assign(1u << 16, Decoded{OP_UNKNOWN, AM_NONE});
+    dcache.assign(1u << 16, Decoded{OP_UNKNOWN, AM_NONE, 0, 0, 0, 0});
     reset(0);
 }
 
@@ -91,6 +107,7 @@ void M88110::reset(uint32_t start) {
     memset(fcr, 0, sizeof(fcr));
     memset(batc_addr, 0, sizeof(batc_addr));
     memset(batc_entry, 0, sizeof(batc_entry));
+    memset(batc_tab, 0, sizeof(batc_tab));
     /* PID: architecture 1 (88110), revision 9 in bits 7..1 (PIX_TestProcessorMasks needs >= 9), master */
     cr[0] = 0x00000100u | (9u << 1) | 1u;
     cr[1] = 0x80000000u;   /* PSR: supervisor */
@@ -115,30 +132,35 @@ std::string M88110::disasm(uint32_t inst, uint32_t at) const {
 M88110::Decoded M88110::decode(uint32_t inst) {
     const uint32_t h = (inst ^ (inst >> 16) ^ (inst >> 7)) & 0xFFFFu;
     if (dcache_tag[h] == inst) return dcache[h];
-    Decoded d{OP_UNKNOWN, AM_NONE};
-    if ((inst & 0xFC00F800u) == 0xF000D000u) d = Decoded{OP_TB0, AM_VEC9};
-    else if ((inst & 0xFC00F800u) == 0xF000D800u) d = Decoded{OP_TB1, AM_VEC9};
-    else if ((inst & 0xFC00F800u) == 0xF000E800u) d = Decoded{OP_TCND, AM_VEC9};
-    else if ((inst & 0xFC1F7E00u) == 0x84002200u) d = Decoded{OP_FLT_X, AM_FP};
+    Decoded d{OP_UNKNOWN, AM_NONE, 0, 0, 0, 0};
+    if ((inst & 0xFC00F800u) == 0xF000D000u) d = Decoded{OP_TB0, AM_VEC9, 0, 0, 0, 0};
+    else if ((inst & 0xFC00F800u) == 0xF000D800u) d = Decoded{OP_TB1, AM_VEC9, 0, 0, 0, 0};
+    else if ((inst & 0xFC00F800u) == 0xF000E800u) d = Decoded{OP_TCND, AM_VEC9, 0, 0, 0, 0};
+    else if ((inst & 0xFC1F7E00u) == 0x84002200u) d = Decoded{OP_FLT_X, AM_FP, FK_FLT, (uint8_t)((inst >> 5) & 3), 0, 0};
     else {
         for (const auto &e : table) {
-            if ((inst & e.mask) == e.value) { d = Decoded{e.op, e.mode}; break; }
+            if ((inst & e.mask) == e.value) { d = Decoded{e.op, e.mode, 0, 0, 0, 0}; break; }
         }
+    }
+    if (d.mode == AM_FP && d.op < OP_COUNT) {
+        d.fk = fp_kind(op_names[d.op]);
+        d.td = fp_sizes[d.op].td; d.t1 = fp_sizes[d.op].t1; d.t2 = fp_sizes[d.op].t2;
     }
     dcache_tag[h] = inst;
     dcache[h] = d;
     return d;
 }
 
-uint32_t M88110::xlate(uint32_t va) const {
-    /* Data BATC: entry = LBA[31:19] | PBA[18:6] | flags[5:0], bit0 = valid [inferred layout] */
-    for (unsigned i = 0; i < 8; i++) {
+void M88110::rebuild_batc() {
+    /* Data BATC entry = LBA[31:19] | PBA[18:6] | flags[5:0], bit0 = valid [inferred layout] */
+    memset(batc_tab, 0, sizeof(batc_tab));
+    for (int i = 7; i >= 0; i--) {
         const uint32_t e = batc_entry[i];
         if (!(e & 1u)) continue;
-        if ((va & 0xFFF80000u) == (e & 0xFFF80000u))
-            return ((e << 13) & 0xFFF80000u) | (va & 0x0007FFFFu);
+        batc_tab[e >> 19] = ((e << 13) & 0xFFF80000u) | 1u;
     }
-    return va;
+    for (unsigned i = 0; i < 8192; i++)          /* identity entries need no translation */
+        if (batc_tab[i] && (batc_tab[i] & 0xFFF80000u) == (i << 19)) batc_tab[i] = 0;
 }
 
 void M88110::branch_to(uint32_t target, bool delayed) {
@@ -207,12 +229,15 @@ void M88110::fset(unsigned reg, unsigned size, bool xrf, double v) {
     if ((reg + 1) & 31) r[(reg + 1) & 31] = (uint32_t)u;
 }
 
+static inline uint32_t be32f(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+
 uint64_t M88110::run(uint64_t n) {
     uint64_t done = 0;
     while (done < n && !halted) {
         const uint32_t ipc = pc;
         if ((ipc == bp[0] || ipc == bp[1] || ipc == bp[2] || ipc == bp[3]) && done && !pending_branch) break;
-        const uint32_t inst = bus->fetch(ipc);
+        const uint8_t *fp = bus->fast[ipc >> 22];
+        const uint32_t inst = fp ? be32f(&fp[ipc & 0x3FFFFCu]) : bus->fetch(ipc);
         const bool had_pending = pending_branch;
         const uint32_t target = pending_target;
         pending_branch = false;
@@ -227,6 +252,15 @@ uint64_t M88110::run(uint64_t n) {
     icount += done;
     return done;
 }
+
+#define FASTP(pa) (bus->fast[(pa) >> 22])
+static inline uint32_t be32p(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+#define RD8(pa)  (FASTP(pa) ? FASTP(pa)[(pa) & 0x3FFFFFu] : bus->rd8(pa))
+#define RD16(pa) (FASTP(pa) ? (uint16_t)((FASTP(pa)[(pa) & 0x3FFFFFu] << 8) | FASTP(pa)[((pa) & 0x3FFFFFu) + 1]) : bus->rd16(pa))
+#define RD32(pa) (FASTP(pa) ? be32p(&FASTP(pa)[(pa) & 0x3FFFFFu]) : bus->rd32(pa))
+#define WR8(pa, v)  do { uint8_t *fp_ = FASTP(pa); if (fp_) fp_[(pa) & 0x3FFFFFu] = (uint8_t)(v); else bus->wr8(pa, (uint8_t)(v)); } while (0)
+#define WR16(pa, v) do { uint8_t *fp_ = FASTP(pa); if (fp_) { uint8_t *q_ = &fp_[(pa) & 0x3FFFFFu]; q_[0] = (uint8_t)((v) >> 8); q_[1] = (uint8_t)(v); } else bus->wr16(pa, (uint16_t)(v)); } while (0)
+#define WR32(pa, v) do { uint8_t *fp_ = FASTP(pa); const uint32_t v_ = (v); if (fp_) { uint8_t *q_ = &fp_[(pa) & 0x3FFFFFu]; q_[0] = (uint8_t)(v_ >> 24); q_[1] = (uint8_t)(v_ >> 16); q_[2] = (uint8_t)(v_ >> 8); q_[3] = (uint8_t)v_; } else bus->wr32(pa, v_); } while (0)
 
 void M88110::execute(uint32_t inst, Decoded d) {
     const unsigned rd = (inst >> 21) & 31, rs1 = (inst >> 16) & 31, rs2 = inst & 31;
@@ -248,19 +282,19 @@ void M88110::execute(uint32_t inst, Decoded d) {
 
     switch (d.op) {
     /* ---- loads ---- */
-    case OP_LD_B: case OP_LD_B_USR: { uint32_t a = xlate(ea(1)); D = (uint32_t)(int32_t)(int8_t)bus->rd8(a); break; }
-    case OP_LD_BU: case OP_LD_BU_USR: { uint32_t a = xlate(ea(1)); D = bus->rd8(a); break; }
-    case OP_LD_H: case OP_LD_H_USR: { uint32_t a = xlate(ea(2)) & ~1u; D = (uint32_t)(int32_t)(int16_t)bus->rd16(a); break; }
-    case OP_LD_HU: case OP_LD_HU_USR: { uint32_t a = xlate(ea(2)) & ~1u; D = bus->rd16(a); break; }
+    case OP_LD_B: case OP_LD_B_USR: { uint32_t a = xlate(ea(1)); D = (uint32_t)(int32_t)(int8_t)RD8(a); break; }
+    case OP_LD_BU: case OP_LD_BU_USR: { uint32_t a = xlate(ea(1)); D = RD8(a); break; }
+    case OP_LD_H: case OP_LD_H_USR: { uint32_t a = xlate(ea(2)) & ~1u; D = (uint32_t)(int32_t)(int16_t)RD16(a); break; }
+    case OP_LD_HU: case OP_LD_HU_USR: { uint32_t a = xlate(ea(2)) & ~1u; D = RD16(a); break; }
     case OP_LD: case OP_LD_USR: {
         uint32_t a = xlate(ea(4)) & ~3u;
-        uint32_t v = bus->rd32(a);
+        uint32_t v = RD32(a);
         if (xrf_form) { if (rd) x[rd] = u2f(v); } else D = v;
         break;
     }
     case OP_LD_D: case OP_LD_D_USR: {
         uint32_t a = xlate(ea(8)) & ~7u;
-        uint32_t hi = bus->rd32(a), lo = bus->rd32(a + 4);
+        uint32_t hi = RD32(a), lo = RD32(a + 4);
         if (xrf_form) { if (rd) x[rd] = u2d(hi, lo); }
         else { D = hi; r[(rd + 1) & 31] = lo; }
         break;
@@ -268,31 +302,31 @@ void M88110::execute(uint32_t inst, Decoded d) {
     case OP_LD_X: case OP_LD_X_USR: {
         /* 128-bit extended in memory; approximate via the double stored in the upper 64 bits [inferred] */
         uint32_t a = xlate(ea(16)) & ~15u;
-        if (rd) x[rd] = u2d(bus->rd32(a), bus->rd32(a + 4));
+        if (rd) x[rd] = u2d(RD32(a), RD32(a + 4));
         break;
     }
     /* ---- stores ---- */
-    case OP_ST_B: case OP_ST_B_USR: case OP_ST_B_WT: case OP_ST_B_USR_WT: bus->wr8(xlate(ea(1)), (uint8_t)D); break;
-    case OP_ST_H: case OP_ST_H_USR: case OP_ST_H_WT: case OP_ST_H_USR_WT: bus->wr16(xlate(ea(2)) & ~1u, (uint16_t)D); break;
+    case OP_ST_B: case OP_ST_B_USR: case OP_ST_B_WT: case OP_ST_B_USR_WT: WR8(xlate(ea(1)), (uint8_t)D); break;
+    case OP_ST_H: case OP_ST_H_USR: case OP_ST_H_WT: case OP_ST_H_USR_WT: WR16(xlate(ea(2)) & ~1u, (uint16_t)D); break;
     case OP_ST: case OP_ST_USR: case OP_ST_WT: case OP_ST_USR_WT: {
         uint32_t a = xlate(ea(4)) & ~3u;
-        bus->wr32(a, xrf_form ? f2u((float)(rd ? x[rd] : 0.0)) : D);
+        WR32(a, xrf_form ? f2u((float)(rd ? x[rd] : 0.0)) : D);
         break;
     }
     case OP_ST_D: case OP_ST_D_USR: case OP_ST_D_WT: case OP_ST_D_USR_WT: {
         uint32_t a = xlate(ea(8)) & ~7u;
-        if (xrf_form) { uint64_t u = d2u(rd ? x[rd] : 0.0); bus->wr32(a, (uint32_t)(u >> 32)); bus->wr32(a + 4, (uint32_t)u); }
-        else { bus->wr32(a, D); bus->wr32(a + 4, r[(rd + 1) & 31]); }
+        if (xrf_form) { uint64_t u = d2u(rd ? x[rd] : 0.0); WR32(a, (uint32_t)(u >> 32)); WR32(a + 4, (uint32_t)u); }
+        else { WR32(a, D); WR32(a + 4, r[(rd + 1) & 31]); }
         break;
     }
     case OP_ST_X: case OP_ST_X_USR: case OP_ST_X_WT: case OP_ST_X_USR_WT: {
         uint32_t a = xlate(ea(16)) & ~15u;
         uint64_t u = d2u(rd ? x[rd] : 0.0);
-        bus->wr32(a, (uint32_t)(u >> 32)); bus->wr32(a + 4, (uint32_t)u); bus->wr32(a + 8, 0); bus->wr32(a + 12, 0);
+        WR32(a, (uint32_t)(u >> 32)); WR32(a + 4, (uint32_t)u); WR32(a + 8, 0); WR32(a + 12, 0);
         break;
     }
-    case OP_XMEM: case OP_XMEM_USR: { uint32_t a = xlate(ea(4)) & ~3u; uint32_t t = bus->rd32(a); bus->wr32(a, D); D = t; break; }
-    case OP_XMEM_BU: case OP_XMEM_BU_USR: { uint32_t a = xlate(ea(1)); uint32_t t = bus->rd8(a); bus->wr8(a, (uint8_t)D); D = t; break; }
+    case OP_XMEM: case OP_XMEM_USR: { uint32_t a = xlate(ea(4)) & ~3u; uint32_t t = RD32(a); WR32(a, D); D = t; break; }
+    case OP_XMEM_BU: case OP_XMEM_BU_USR: { uint32_t a = xlate(ea(1)); uint32_t t = RD8(a); WR8(a, (uint8_t)D); D = t; break; }
     case OP_LDA: case OP_LDA_USR: D = S1 + r[rs2] * 4; break;
     case OP_LDA_D: case OP_LDA_D_USR: D = S1 + r[rs2] * 8; break;
     case OP_LDA_H: case OP_LDA_H_USR: D = S1 + r[rs2] * 2; break;
@@ -400,6 +434,7 @@ void M88110::execute(uint32_t inst, Decoded d) {
         if (c == 46) {                             /* dbp: write BATC entry selected by dir */
             const unsigned i = cr[45] & 7u;
             batc_entry[i] = v;
+            rebuild_batc();
         }
         if (d.op == OP_XCR) D = old;
         break;
@@ -492,42 +527,45 @@ void M88110::execute(uint32_t inst, Decoded d) {
 
     default: {
         /* floating point */
-        if (d.mode == AM_FP || d.op == OP_FLT_X) {
+        if (d.mode == AM_FP) {
             const bool xrf = (inst >> 15) & 1u;
-            const FpSizes s = d.op < OP_COUNT ? fp_sizes[d.op] : FpSizes{(uint8_t)((inst >> 5) & 3), 0, 0};
-            const char *n = d.op < OP_COUNT ? op_names[d.op] : "flt";
-            if (d.op == OP_FLT_X) { if (rd) x[rd] = (double)(int32_t)r[rs2]; break; }
-            if (!strncmp(n, "flt.", 4)) {
-                const double v = (double)(int32_t)r[rs2];
-                fset(rd, s.td, d.op == OP_FLT_XS, v);
-                break;
+            switch (d.fk) {
+            case FK_FLT:
+                if (d.op == OP_FLT_X) { if (rd) x[rd] = (double)(int32_t)r[rs2]; }
+                else fset(rd, d.td, d.op == OP_FLT_XS, (double)(int32_t)r[rs2]);
+                return;
+            case FK_INT: case FK_NINT: case FK_TRNC: {
+                const double v = fget(rs2, d.t2, xrf || d.t2 == 2);
+                D = (uint32_t)(d.fk == FK_TRNC ? (int32_t)v : round_nearest_even(v));
+                return;
             }
-            if (!strncmp(n, "int.", 4) || !strncmp(n, "nint.", 5) || !strncmp(n, "trnc.", 5)) {
-                const double v = fget(rs2, s.t2, xrf || s.t2 == 2);
-                int32_t iv = n[0] == 't' ? (int32_t)v : round_nearest_even(v);
-                D = (uint32_t)iv;
-                break;
-            }
-            if (!strncmp(n, "mov", 3)) {
+            case FK_MOV: {
                 const uint32_t grp = inst & 0xFC00FFE0u;
                 if (grp == 0x84004200u) { if (rd) x[rd] = u2f(r[rs2]); }
                 else if (grp == 0x84004280u) { if (rd) x[rd] = u2d(r[rs2], r[(rs2 + 1) & 31]); }
                 else if (grp == 0x8400C000u) { D = f2u((float)x[rs2]); }
                 else if (grp == 0x8400C080u) { uint64_t u = d2u(x[rs2]); D = (uint32_t)(u >> 32); r[(rd + 1) & 31] = (uint32_t)u; }
                 else { if (rd) x[rd] = x[rs2]; }
-                break;
+                return;
             }
-            if (!strncmp(n, "fcvt.", 5)) { fset(rd, s.td, xrf, fget(rs2, s.t2, xrf)); break; }
-            const double a = fget(rs1, s.t1, xrf), b = fget(rs2, s.t2, xrf);
-            if (!strncmp(n, "fcmp", 4)) { D = fcmp_bits(a, b); break; }
-            double v = 0;
-            if (!strncmp(n, "fadd", 4)) v = a + b;
-            else if (!strncmp(n, "fsub", 4)) v = a - b;
-            else if (!strncmp(n, "fmul", 4)) v = a * b;
-            else if (!strncmp(n, "fdiv", 4)) v = a / b;
-            else if (!strncmp(n, "fsqrt", 5)) v = sqrt(b);
-            fset(rd, s.td, xrf, v);
-            break;
+            case FK_CVT: fset(rd, d.td, xrf, fget(rs2, d.t2, xrf)); return;
+            case FK_NONE: break;
+            default: {
+                const double a = fget(rs1, d.t1, xrf), b = fget(rs2, d.t2, xrf);
+                double v = 0;
+                switch (d.fk) {
+                    case FK_CMP: D = fcmp_bits(a, b); return;
+                    case FK_ADD: v = a + b; break;
+                    case FK_SUB: v = a - b; break;
+                    case FK_MUL: v = a * b; break;
+                    case FK_DIV: v = a / b; break;
+                    case FK_SQRT: v = sqrt(b); break;
+                    default: break;
+                }
+                fset(rd, d.td, xrf, v);
+                return;
+            }
+            }
         }
         unknown_count++;
         last_unknown_inst = inst;

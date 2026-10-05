@@ -27,7 +27,7 @@ void PixBus::wr32(uint32_t pa, uint32_t v) {
     uint8_t *p = mem_ptr(board, pa);
     if (p) {
         wbe32(p, v);
-        if (pa == 0x200C || pa == 0x1000200C) { board->display_base = v; board->grab_frame(); }
+
     } else board->dev_write(which, pa, v, 4);
 }
 uint32_t PixBus::fetch(uint32_t pa) { return rd32(pa); }
@@ -38,6 +38,13 @@ PixBoard::PixBoard() : bus_a(this, 0), bus_b(this, 1) {
     memset(sam, 0, sizeof(sam));
     dram.assign(DRAM_SIZE, 0);
     vram.assign(VRAM_SIZE, 0);
+    for (PixBus *bus : {&bus_a, &bus_b}) {
+        for (unsigned i = 0; i < DRAM_SIZE >> 22; i++) {
+            bus->fast[i] = &dram[(size_t)i << 22];
+            bus->fast[(0x10000000u >> 22) + i] = &dram[(size_t)i << 22];   /* uncached alias */
+        }
+        bus->fast[0x40000000u >> 22] = &vram[0];
+    }
     cpu_a = new M88110(&bus_a);
     cpu_b = new M88110(&bus_b);
 }
@@ -166,6 +173,8 @@ uint64_t PixBoard::run(uint64_t n) {
             done += k;
             clock += k;
             a_ran = true;
+            const uint32_t disp = be32(&dram[0x200C]);
+            if (disp != display_base) { display_base = disp; grab_frame(); }
             if (cpu_a->unknown_count) {
                 fprintf(stderr, "PIX: A unknown opcode %08x at %08x\n", cpu_a->last_unknown_inst, cpu_a->last_unknown_pc);
                 cpu_a->unknown_count = 0;
