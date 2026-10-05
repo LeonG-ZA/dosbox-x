@@ -28,5 +28,6 @@ libhardware_a_SOURCES = adlib.cpp dma.cpp gameblaster.cpp hardware.cpp imfc.cpp 
 			RetroWaveLib/Protocol/Serial.c \
 			RetroWaveLib/RetroWave_DOSBoX.cpp \
 			RetroWaveLib/RetroWave.c \
+			su2000/su2000.cpp su2000/pix1000.cpp su2000/tracker.cpp \
 			esfmu/esfm.c \
 			esfmu/esfm_registers.c

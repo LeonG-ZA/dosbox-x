@@ -366,6 +366,7 @@ void                TANDYSOUND_Init(Section*);
 void                DISNEY_Init(Section*);
 void                PS1SOUND_Init(Section*);
 void                INNOVA_Init(Section*);
+void                SU2000_AddConfigSection(Config *conf);
 void                IMFC_Init(Section*);
 void                SERIAL_Init(Section*);
 void                DONGLE_Init(Section*);
@@ -4184,6 +4185,8 @@ void DOSBOX_SetupConfigSections(void) {
         "the patch files for GUS playback. Patch sets used\n"
         "with Timidity should work fine.");
     Pstring->SetBasic(true);
+
+    SU2000_AddConfigSection(control);
 
     secprop = control->AddSection_prop("innova",&Null_Init,true);//done
     Pbool = secprop->Add_bool("innova",Property::Changeable::WhenIdle,false);
