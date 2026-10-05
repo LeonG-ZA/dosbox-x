@@ -88,6 +88,14 @@ void PixBoard::find_b_entry_points() {
         if (w == 0x179E0100u && be32(&dram[pc + 4]) == 0xF7BC7C00u && be32(&dram[pc + 8]) == 0xD85DFFFEu && !mainb_poll_pc)
             mainb_poll_pc = pc;
     }
+    disp32 = draw32_addr ? draw32_addr + 0x2C : 0;   /* ld.d r4,r28,$0: record dispatch head */
+    disp16 = draw16_addr ? draw16_addr + 0x2C : 0;
+    if (disp32 && be32(&dram[disp32]) != 0x109C0000u) disp32 = 0;
+    if (disp16 && be32(&dram[disp16]) != 0x109C0000u) disp16 = 0;
+    cpu_b->bp[0] = disp32 ? disp32 : 0xFFFFFFFFu;
+    cpu_b->bp[1] = disp16 ? disp16 : 0xFFFFFFFFu;
+    cpu_b->bp[2] = mainb_poll_pc ? mainb_poll_pc : 0xFFFFFFFFu;
+    fprintf(stderr, "PIX: dispatch heads %#x %#x\n", disp32, disp16);
     fprintf(stderr, "PIX: mainB %#x draw32B %#x draw16B %#x poll %#x\n", mainb, draw32_addr, draw16_addr, mainb_poll_pc);
 }
 
@@ -113,14 +121,21 @@ bool PixBoard::vram_transfer(uint32_t pa, bool write, uint32_t v) {
 uint32_t PixBoard::dev_read(int cpu, uint32_t pa, unsigned size) {
     if (vram_transfer(pa, false, 0)) return 0;
     if ((pa & ~1u) == 0x20000006u || pa == 0x20000004u) {
-        if (!fifo.empty()) { last_fifo = fifo.front(); fifo.pop_front(); fifo_pops++; }
+        uint16_t w;
+        if (fifo_pop(w)) { last_fifo = w; fifo_pops++; if (cpu == 0) a_waiting_fifo = false; }
         return size == 4 ? ((uint32_t)last_fifo << 16) : last_fifo;   /* only 16-bit reads seen */
     }
     if (pa == 0x30000000u) {
+        /* The video timing generator runs independently of the host, so it is clocked from CPU A's own
+         * instruction count; waitVBI needs to see every line value (it tests for equality). */
         const uint32_t line = (uint32_t)((clock / insns_per_line) % lines_per_frame);
         uint32_t v = ((uint32_t)(card_id & 15u) << 25) | ((line & 0x3FFu) << 1);
-        if (!fifo.empty()) v |= 1u << 29;
-        else if (cpu == 0) a_waiting_fifo = true;
+        if (fifo_level()) { v |= 1u << 29; if (cpu == 0) a_waiting_fifo = false; }
+        else if (cpu == 0) {
+            /* blocked only if this is the FIFO poll loop: next instruction is bb0 29,rX (waitWordFIFO) */
+            const uint32_t next = be32(&dram[cpu_a->pc & (DRAM_SIZE - 1)]);
+            a_waiting_fifo = (next & 0xFFE00000u) == 0xD3A00000u;
+        }
         return v;
     }
     if ((pa & ~1u) == 0x30000006u) return ctrl;
@@ -137,53 +152,119 @@ void PixBoard::dev_write(int cpu, uint32_t pa, uint32_t v, unsigned size) {
 }
 
 uint64_t PixBoard::run(uint64_t n) {
-    uint64_t done_a = 0;
+    /* Interleave CPU A and CPU B in slices. A does not run while it is blocked on an empty FIFO;
+     * B does not run while it polls an empty draw-list slot. Returns instructions executed by both;
+     * sets idle when neither CPU has work. */
+    uint64_t done = 0;
     const uint64_t slice = 2000;
-    while (done_a < n) {
-        bool progress = false;
-        if (a_on) {
+    idle = false;
+    while (done < n) {
+        bool a_ran = false, b_ran = false;
+        if (a_on && !(a_waiting_fifo && !fifo_level())) {
             a_waiting_fifo = false;
             const uint64_t k = cpu_a->run(slice);
-            done_a += k;
+            done += k;
             clock += k;
-            progress = true;
+            a_ran = true;
             if (cpu_a->unknown_count) {
                 fprintf(stderr, "PIX: A unknown opcode %08x at %08x\n", cpu_a->last_unknown_inst, cpu_a->last_unknown_pc);
                 cpu_a->unknown_count = 0;
             }
         }
         if (b_on) {
+            const uint64_t b0 = cpu_b->icount;
             uint64_t left = slice;
             while (left) {
-                if (hle_b && draw32_addr && (cpu_b->pc == draw32_addr || cpu_b->pc == draw16_addr)) {
-                    hle_draw(cpu_b->pc == draw32_addr);
-                    cpu_b->pc = cpu_b->r[1];
-                    draws++;
+                const uint32_t bpc = cpu_b->pc;
+                if (bpc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7100]) == 0) break;   /* idle */
+                if (bpc && (bpc == disp32 || bpc == disp16)) {
+                    /* close the previous record's statistics */
+                    if (cur_type >= 0) {
+                        TypeStat &t = type_stats[cur_type & 255];
+                        t.insns += cpu_b->icount - cur_insn0;
+                        t.bytes += cpu_b->r[28] - cur_ptr;
+                    }
+                    const uint32_t ptr = cpu_b->r[28];
+                    const int type = (int8_t)dram[ptr & (DRAM_SIZE - 1)];
+                    cur_type = type; cur_insn0 = cpu_b->icount; cur_ptr = ptr;
+                    type_stats[type & 255].count++;
+                    if (type == 0) cur_type = -1;
+                    else if (hle_b) {
+                        extern bool PixRaster_Record(PixBoard *b, M88110 *cpu, int type, bool bpp32);
+                        if (compare_every && (type_stats[type & 255].count % compare_every) == 1) {
+                            /* run the HLE on a copy, then the original handler, and diff VRAM */
+                            std::vector<uint8_t> before(vram);
+                            uint32_t regs[32];
+                            memcpy(regs, cpu_b->r, sizeof(regs));
+                            if (PixRaster_Record(this, cpu_b, type, bpc == disp32)) {
+                                std::vector<uint8_t> hle(vram);
+                                const uint32_t hle_r28 = cpu_b->r[28];
+                                vram.swap(before);
+                                memcpy(cpu_b->r, regs, sizeof(regs));
+                                cpu_b->pc = bpc;
+                                const uint64_t i0 = cpu_b->icount;
+                                do { cpu_b->run(1u << 30); } while (cpu_b->pc != disp32 && cpu_b->pc != disp16 && cpu_b->pc != mainb_poll_pc);
+                                size_t diff = 0, first = 0;
+                                for (size_t i = 0; i < vram.size(); i++) if (vram[i] != hle[i]) { if (!diff) first = i; diff++; }
+                                compare_runs++;
+                                if (diff || hle_r28 != cpu_b->r[28]) {
+                                    compare_fail++;
+                                    if (compare_fail < 20)
+                                        fprintf(stderr, "PIX compare: type %#x rec %08x: %zu bytes differ (first %#zx hle %02x lle %02x), r28 hle %08x lle %08x, lle %llu insns\n",
+                                                type & 255, regs[28], diff, first, hle[first], vram[first], hle_r28, cpu_b->r[28],
+                                                (unsigned long long)(cpu_b->icount - i0));
+                                }
+                                cur_type = -1;
+                                continue;
+                            }
+                        }
+                        if (PixRaster_Record(this, cpu_b, type, bpc == disp32)) {
+                            type_stats[type & 255].hle++;
+                            cur_type = -1;
+                            continue;          /* record consumed; B stays at the dispatch head */
+                        }
+                    }
                 }
-                /* idle: B polls [global+0x100] - skip while it is zero */
-                if (cpu_b->pc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7100]) == 0) break;
-                const uint64_t k = cpu_b->run(left > 64 ? 64 : left);
-                if (!hle_b && (cpu_b->pc == draw32_addr || cpu_b->pc == draw16_addr)) draws++;
-                left -= k;
+                const uint64_t k = cpu_b->run(left);
+                left -= k < left ? k : left;
                 if (!k) break;
             }
             if (cpu_b->unknown_count) {
                 fprintf(stderr, "PIX: B unknown opcode %08x at %08x\n", cpu_b->last_unknown_inst, cpu_b->last_unknown_pc);
                 cpu_b->unknown_count = 0;
             }
-            progress = true;
+            done += cpu_b->icount - b0;
+            b_ran = cpu_b->icount != b0;
         }
-        if (!progress) break;
-        if (a_on && a_waiting_fifo && fifo.empty()) break;
+        if (!a_ran && !b_ran) { idle = true; break; }
     }
-    return done_a;
+    return done;
 }
 
-void PixBoard::hle_draw(bool bpp32) {
-    (void)bpp32;
-    /* filled in by pixraster.cpp (PixRaster_Draw) */
-    extern void PixRaster_Draw(PixBoard *b, M88110 *cpu, bool bpp32);
-    PixRaster_Draw(this, cpu_b, bpp32);
+void PixBoard::hle_draw(bool bpp32) { (void)bpp32; }
+
+bool PixBoard::render_frame(PixFrame &out) {
+    const uint32_t stride = be32(&dram[0x7040]);
+    const uint32_t rows = be32(&dram[0x7050]);
+    if ((display_base & 0xFFC00000u) != 0x40000000u || stride == 0 || stride > 8192 || rows == 0 || rows > 512) return false;
+    const bool px16 = (dram[0x2106] >> 1) & 1;
+    const unsigned bpp = px16 ? 2 : 4;
+    out.width = stride / bpp;
+    out.height = rows * 0x2000u / stride;
+    if (out.height > 1024) out.height = 1024;
+    out.pixels.resize((size_t)out.width * out.height);
+    for (unsigned y = 0; y < out.height; y++) {
+        const uint32_t row = (display_base + y * stride) & (VRAM_SIZE - 1);
+        uint32_t *dst = &out.pixels[(size_t)y * out.width];
+        for (unsigned x = 0; x < out.width; x++) {
+            const uint8_t *p = &vram[(row + x * bpp) & (VRAM_SIZE - 1)];
+            if (px16) {
+                const unsigned v = ((unsigned)p[0] << 8) | p[1];
+                dst[x] = (((v >> 8) & 15u) * 17u << 16) | (((v >> 4) & 15u) * 17u << 8) | ((v & 15u) * 17u);
+            } else dst[x] = ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+        }
+    }
+    return true;
 }
 
 void PixBoard::grab_frame() {
@@ -193,5 +274,14 @@ void PixBoard::grab_frame() {
 void PixBoard::report(FILE *f) {
     fprintf(f, "PIX board: A pc=%08x (%llu insns)  B pc=%08x (%llu insns)  fifo pops %llu  draws %llu  unknown io %llu  fifo left %zu\n",
             cpu_a->pc, (unsigned long long)cpu_a->icount, cpu_b->pc, (unsigned long long)cpu_b->icount,
-            (unsigned long long)fifo_pops, (unsigned long long)draws, (unsigned long long)unknown_io, fifo.size());
+            (unsigned long long)fifo_pops, (unsigned long long)draws, (unsigned long long)unknown_io, fifo_level());
+    fprintf(f, "HLE compare: %llu checked, %llu mismatched\n", (unsigned long long)compare_runs, (unsigned long long)compare_fail);
+    fprintf(f, "draw-list records: type count avg_bytes avg_B_insns hle\n");
+    for (int t = -128; t < 128; t++) {
+        const TypeStat &s = type_stats[t & 255];
+        if (!s.count) continue;
+        const uint64_t lle = s.count - s.hle;
+        fprintf(f, "  %4d (%#04x) %10llu %8.1f %10.1f %llu\n", t, t & 255, (unsigned long long)s.count,
+                lle ? (double)s.bytes / lle : 0.0, lle ? (double)s.insns / lle : 0.0, (unsigned long long)s.hle);
+    }
 }

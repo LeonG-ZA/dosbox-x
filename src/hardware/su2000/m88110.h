@@ -52,6 +52,7 @@ public:
     void (*trap_hook)(M88110 *cpu, unsigned vec, void *user);  /* tb0/tb1/tcnd/tbnd traps */
     void *trap_user;
     bool trace;
+    uint32_t bp[4];             /* run() stops before executing an instruction at one of these (0 = unused) */
     std::string disasm(uint32_t inst, uint32_t at) const;
 
     /* Memory helpers using the data BATC translation */
