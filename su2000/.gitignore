@@ -1,0 +1,8 @@
+# Proprietary SU2000 data and anything derived from it in bulk: never commit.
+data/
+logs/
+re/strings/
+re/*/*.asm
+re/*.symmap
+re/inventory.tsv
+__pycache__/

@@ -1,0 +1,40 @@
+/*
+ *  Virtuality SU2000 hardware emulation (research build).
+ *
+ *  Shared declarations for the SU2000 device stubs: the binary bus-trace logger and the
+ *  per-device init entry points. See su2000/docs/PROTOCOL.md for the hardware being modelled.
+ */
+#ifndef DOSBOX_SU2000_H
+#define DOSBOX_SU2000_H
+
+#include <stdint.h>
+#include <string>
+
+/* Record kinds for the binary trace (.su2k files). Keep in sync with su2000/tools/su2klog.py. */
+enum SU2K_Kind : uint8_t {
+    SU2K_IO_READ   = 1,
+    SU2K_IO_WRITE  = 2,
+    SU2K_MEM_READ  = 3,  /* addr = ISA physical address, aux = board address (PIX window) */
+    SU2K_MEM_WRITE = 4,
+    SU2K_FIFO      = 5,  /* PIX broadcast FIFO word */
+    SU2K_EVENT     = 6,  /* emulator-side event, value = SU2K_Event */
+};
+
+enum SU2K_Event : uint32_t {
+    SU2K_EV_RUN_A      = 1,  /* aux = card index */
+    SU2K_EV_RUN_B      = 2,
+    SU2K_EV_RESET      = 3,
+    SU2K_EV_FAKE_WRITE = 4,  /* addr = board address, aux = card, value written by the stub */
+};
+
+void SU2K_Log(SU2K_Kind kind, uint8_t width, uint32_t addr, uint32_t value, uint32_t aux = 0);
+bool SU2K_LogEnabled(void);
+
+/* Device init/teardown, called from su2000.cpp */
+void PIX1000_Setup(uint32_t fifo_port, const uint32_t *proc_ports, unsigned int nproc,
+                   uint32_t video_port, uint32_t procmem, bool fake_boot, unsigned int fake_cpu_rev);
+void PIX1000_Shutdown(void);
+void TRACKER_Setup(const uint32_t *ports, unsigned int n);
+void TRACKER_Shutdown(void);
+
+#endif
