@@ -22,6 +22,11 @@
 #include "regs.h"
 #include "logging.h"
 #include "su2000.h"
+#include "pixboard.h"
+
+#if C_SDL2
+#include "SDL.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -184,10 +189,103 @@ static uint32_t parse_hex(const std::string &s) {
     return (uint32_t)strtoul(s.c_str(), NULL, 0);
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* PIX display: show each channel's displayed buffer side by side (left = channel 1)            */
+
+static bool su2k_pix_window = false;
+static std::string su2k_frame_dir;
+static uint32_t su2k_seen_seq[4];
+static unsigned su2k_dumped = 0;
+#if C_SDL2
+static SDL_Window *su2k_sdlwin = NULL;
+static SDL_Renderer *su2k_ren = NULL;
+static SDL_Texture *su2k_tex = NULL;
+static unsigned su2k_tex_w = 0, su2k_tex_h = 0;
+static std::vector<uint32_t> su2k_canvas;
+#endif
+
+static void su2k_display_close(void) {
+#if C_SDL2
+    if (su2k_tex) SDL_DestroyTexture(su2k_tex);
+    if (su2k_ren) SDL_DestroyRenderer(su2k_ren);
+    if (su2k_sdlwin) SDL_DestroyWindow(su2k_sdlwin);
+    su2k_tex = NULL; su2k_ren = NULL; su2k_sdlwin = NULL; su2k_tex_w = su2k_tex_h = 0;
+#endif
+}
+
+static void su2k_display_tick(Bitu val) {
+    (void)val;
+    PIX1000_Tick();
+    const unsigned n = PIX1000_NumCards();
+    PixFrame f[4];
+    bool any_new = false, have[4] = {false, false, false, false};
+    unsigned w = 0, h = 0;
+    for (unsigned i = 0; i < n && i < 4; i++) {
+        uint32_t seq = 0;
+        if (PIX1000_GetFrame(i, f[i], seq)) {
+            have[i] = true;
+            if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; }
+            w += f[i].width;
+            if (f[i].height > h) h = f[i].height;
+        }
+    }
+    if (any_new && w && h) {
+        if (!su2k_frame_dir.empty()) {
+            char name[1024];
+            snprintf(name, sizeof(name), "%s/pix%06u.ppm", su2k_frame_dir.c_str(), su2k_dumped++);
+            FILE *fp = fopen(name, "wb");
+            if (fp) {
+                fprintf(fp, "P6\n%u %u\n255\n", w, h);
+                for (unsigned y = 0; y < h; y++)
+                    for (unsigned i = 0; i < n && i < 4; i++) {
+                        if (!have[i]) continue;
+                        for (unsigned x = 0; x < f[i].width; x++) {
+                            const uint32_t p = y < f[i].height ? f[i].pixels[(size_t)y * f[i].width + x] : 0;
+                            fputc((int)((p >> 16) & 255), fp); fputc((int)((p >> 8) & 255), fp); fputc((int)(p & 255), fp);
+                        }
+                    }
+                fclose(fp);
+            }
+        }
+#if C_SDL2
+        if (su2k_pix_window) {
+            if (!su2k_sdlwin) {
+                su2k_sdlwin = SDL_CreateWindow("SU2000 PIX 1000 (channel 1 | channel 2)", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                            (int)w, (int)h * 2, SDL_WINDOW_RESIZABLE);
+                if (su2k_sdlwin) su2k_ren = SDL_CreateRenderer(su2k_sdlwin, -1, 0);
+                if (!su2k_ren) { LOG_MSG("SU2000: cannot open the PIX window: %s", SDL_GetError()); su2k_pix_window = false; su2k_display_close(); }
+            }
+            if (su2k_ren && (w != su2k_tex_w || h != su2k_tex_h)) {
+                if (su2k_tex) SDL_DestroyTexture(su2k_tex);
+                su2k_tex = SDL_CreateTexture(su2k_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, (int)w, (int)h);
+                su2k_tex_w = w; su2k_tex_h = h;
+            }
+            if (su2k_tex) {
+                su2k_canvas.assign((size_t)w * h, 0);
+                unsigned x0 = 0;
+                for (unsigned i = 0; i < n && i < 4; i++) {
+                    if (!have[i]) continue;
+                    for (unsigned y = 0; y < f[i].height && y < h; y++)
+                        memcpy(&su2k_canvas[(size_t)y * w + x0], &f[i].pixels[(size_t)y * f[i].width], f[i].width * 4);
+                    x0 += f[i].width;
+                }
+                SDL_UpdateTexture(su2k_tex, NULL, su2k_canvas.data(), (int)(w * 4));
+                SDL_RenderClear(su2k_ren);
+                SDL_RenderCopy(su2k_ren, su2k_tex, NULL, NULL);   /* PAL lines are shown doubled by the window aspect */
+                SDL_RenderPresent(su2k_ren);
+            }
+        }
+#endif
+    }
+    PIC_AddEvent(su2k_display_tick, 20.0);
+}
+
 static void SU2000_Teardown(void) {
     if (!su2k_active) return;
+    PIC_RemoveEvents(su2k_display_tick);
     PIX1000_Shutdown();
     TRACKER_Shutdown();
+    su2k_display_close();
     for (auto *p : su2k_rd) delete p;
     for (auto *p : su2k_wr) delete p;
     su2k_rd.clear();
@@ -227,6 +325,10 @@ static void SU2000_OnReset(Section *sec) {
         std::string tok;
         while (nproc < 4 && in >> tok) procs[nproc++] = parse_hex(tok);
     }
+    PIX1000_SetMode(s->Get_bool("pix emulation"), s->Get_bool("pix hle"));
+    su2k_pix_window = s->Get_bool("pix window");
+    su2k_frame_dir = s->Get_string("pix frame dump");
+    memset(su2k_seen_seq, 0, sizeof(su2k_seen_seq));
     PIX1000_Setup(parse_hex(s->Get_string("pix fifo port")), procs, nproc,
                   parse_hex(s->Get_string("pix video port")), parse_hex(s->Get_string("pix procmem")),
                   s->Get_bool("pix fake boot"), (unsigned int)s->Get_int("pix cpu revision"));
@@ -254,6 +356,8 @@ static void SU2000_OnReset(Section *sec) {
         su2k_stub_window(parse_hex(tok.substr(0, c)), c == std::string::npos ? 0x1000u : parse_hex(tok.substr(c + 1)));
     }
     PAGING_ClearTLB();
+    PIC_RemoveEvents(su2k_display_tick);
+    PIC_AddEvent(su2k_display_tick, 20.0);
     su2k_screen_path = s->Get_string("screen dump");
     PIC_RemoveEvents(su2k_screen_dump);
     if (!su2k_screen_path.empty()) PIC_AddEvent(su2k_screen_dump, 1000.0);
@@ -289,6 +393,15 @@ void SU2000_AddConfigSection(Config *conf) {
     Pstring->Set_help("I/O base of the PIX video card (CONFIG.VPC video1).");
     Pstring = secprop->Add_string("pix procmem", Property::Changeable::WhenIdle, "0xD0000");
     Pstring->Set_help("Physical address of the 64KB processor-card memory window (CONFIG.VPC procMem).");
+    Pbool = secprop->Add_bool("pix emulation", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Run the uploaded PIX firmware: CPU A (geometry) in an MC88110 interpreter, CPU B (rasteriser)\n"
+                    "in HLE with interpreter fallback. false = logging stub only.");
+    Pbool = secprop->Add_bool("pix hle", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Replace CPU B's draw-list handlers with C++ where implemented (false = interpret all of CPU B).");
+    Pbool = secprop->Add_bool("pix window", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Show the PIX video channels in a separate window (SDL2 builds).");
+    Pstring = secprop->Add_string("pix frame dump", Property::Changeable::WhenIdle, "");
+    Pstring->Set_help("If set, write every new PIX frame (all channels side by side) as a PPM into this directory.");
     Pbool = secprop->Add_bool("pix fake boot", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("When the host starts the 88110s, write the 'CPU ready' words the firmware would write\n"
                     "(board 0x2100 and 0x2102) so PIX_Open's processor test passes.");

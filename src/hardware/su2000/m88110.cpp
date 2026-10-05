@@ -78,6 +78,7 @@ M88110::M88110(M88110Bus *b) : bus(b) {
     trap_hook = NULL;
     trap_user = NULL;
     trace = false;
+    bp[0] = bp[1] = bp[2] = bp[3] = 0xFFFFFFFFu;
     dcache_tag.assign(1u << 16, 0xFFFFFFFFu);
     dcache.assign(1u << 16, Decoded{OP_UNKNOWN, AM_NONE});
     reset(0);
@@ -210,6 +211,7 @@ uint64_t M88110::run(uint64_t n) {
     uint64_t done = 0;
     while (done < n && !halted) {
         const uint32_t ipc = pc;
+        if ((ipc == bp[0] || ipc == bp[1] || ipc == bp[2] || ipc == bp[3]) && done && !pending_branch) break;
         const uint32_t inst = bus->fetch(ipc);
         const bool had_pending = pending_branch;
         const uint32_t target = pending_target;

@@ -34,6 +34,11 @@ bool SU2K_LogEnabled(void);
 void PIX1000_Setup(uint32_t fifo_port, const uint32_t *proc_ports, unsigned int nproc,
                    uint32_t video_port, uint32_t procmem, bool fake_boot, unsigned int fake_cpu_rev);
 void PIX1000_Shutdown(void);
+struct PixFrame;
+bool PIX1000_GetFrame(unsigned i, PixFrame &out, uint32_t &seq);
+unsigned PIX1000_NumCards(void);
+void PIX1000_SetMode(bool emulation, bool hle_b);
+void PIX1000_Tick(void);
 void TRACKER_Setup(const uint32_t *ports, unsigned int n);
 void TRACKER_Shutdown(void);
 

@@ -3,7 +3,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src/aviwriter -I$(top_srcd
 SUBDIRS = serialport parport reSID mame
 
 EXTRA_DIST = opl.cpp opl.h adlib.h dbopl.h hardopl.h pci_devices.h voodoo_types.h voodoo_def.h voodoo_data.h \
-             voodoo_interface.h voodoo_emu.h voodoo_vogl.h voodoo_opengl.h mic_input_win32.h
+             voodoo_interface.h voodoo_emu.h su2000/m88110_ops.inc su2000/m88110.h su2000/pixboard.h su2000/su2000.h voodoo_vogl.h voodoo_opengl.h mic_input_win32.h
 
 noinst_LIBRARIES = libhardware.a
 
@@ -28,6 +28,6 @@ libhardware_a_SOURCES = adlib.cpp dma.cpp gameblaster.cpp hardware.cpp imfc.cpp 
 			RetroWaveLib/Protocol/Serial.c \
 			RetroWaveLib/RetroWave_DOSBoX.cpp \
 			RetroWaveLib/RetroWave.c \
-			su2000/su2000.cpp su2000/pix1000.cpp su2000/tracker.cpp \
+			su2000/su2000.cpp su2000/pix1000.cpp su2000/tracker.cpp su2000/pixboard.cpp su2000/pixraster.cpp su2000/m88110.cpp \
 			esfmu/esfm.c \
 			esfmu/esfm_registers.c
