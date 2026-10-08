@@ -216,18 +216,32 @@ static void su2k_display_close(void) {
 static void su2k_display_tick(Bitu val) {
     (void)val;
     PIX1000_Tick();
-    const unsigned n = PIX1000_NumCards();
+    const unsigned ncards = PIX1000_NumCards();
+    /* Build video channels from the processor cards: a card whose band starts at line 0 begins a channel, a card whose
+     * band starts further down contributes its lines to the previous channel (SU2000 Solo: two cards, one picture). */
     PixFrame f[4];
+    unsigned n = 0;
     bool any_new = false, have[4] = {false, false, false, false};
     unsigned w = 0, h = 0;
-    for (unsigned i = 0; i < n && i < 4; i++) {
+    for (unsigned i = 0; i < ncards && i < 4; i++) {
         uint32_t seq = 0;
-        if (PIX1000_GetFrame(i, f[i], seq)) {
-            have[i] = true;
-            if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; }
-            w += f[i].width;
-            if (f[i].height > h) h = f[i].height;
+        PixFrame cf;
+        if (!PIX1000_GetFrame(i, cf, seq)) continue;
+        if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; }
+        if (cf.band_lo == 0 || n == 0 || f[n - 1].width != cf.width) {
+            f[n] = cf;
+            have[n] = true;
+            n++;
+        } else {
+            PixFrame &c = f[n - 1];
+            if (cf.height > c.height) { c.pixels.resize((size_t)c.width * cf.height, 0); c.height = cf.height; }
+            for (unsigned y = cf.band_lo; y <= cf.band_hi && y < cf.height; y++)
+                memcpy(&c.pixels[(size_t)y * c.width], &cf.pixels[(size_t)y * cf.width], cf.width * 4);
         }
+    }
+    for (unsigned i = 0; i < n; i++) {
+        w += f[i].width;
+        if (f[i].height > h) h = f[i].height;
     }
     if (any_new && w && h) {
         if (!su2k_frame_dir.empty()) {
@@ -285,6 +299,7 @@ static void SU2000_Teardown(void) {
     PIC_RemoveEvents(su2k_display_tick);
     PIX1000_Shutdown();
     TRACKER_Shutdown();
+    FCARD_Shutdown();
     su2k_display_close();
     for (auto *p : su2k_rd) delete p;
     for (auto *p : su2k_wr) delete p;
@@ -340,6 +355,20 @@ static void SU2000_OnReset(Section *sec) {
         std::string t;
         while (nt < 2 && in >> t) tp[nt++] = parse_hex(t);
         TRACKER_Setup(tp, nt);
+        TRACKER_SetPose(s->Get_string("tracker pose"));
+        TRACKER_SetCalibrate(s->Get_bool("tracker calibrate"));
+        TRACKER_SetHandTarget(s->Get_string("tracker hand target"));
+        TRACKER_SetMouse(s->Get_bool("tracker mouse"));
+    }
+    {
+        /* format/control cards: "ctrl ports" and "ctrl mem" pair up in order */
+        uint32_t cio[2], cmem[2];
+        unsigned int ni = 0, nm = 0;
+        std::istringstream in1(s->Get_string("ctrl ports")), in2(s->Get_string("ctrl mem"));
+        std::string t;
+        while (ni < 2 && in1 >> t) cio[ni++] = parse_hex(t);
+        while (nm < 2 && in2 >> t) cmem[nm++] = parse_hex(t);
+        FCARD_Setup(cio, cmem, ni < nm ? ni : nm);
     }
 
     /* Logging-only stubs (Milestone 3 replaces these) */
@@ -368,6 +397,7 @@ static void SU2000_OnReset(Section *sec) {
 void SU2000_Init() {
     AddExitFunction(AddExitFunctionFuncPair(SU2000_ShutDown), true);
     AddVMEventFunction(VM_EVENT_RESET, AddVMEventFunctionFuncPair(SU2000_OnReset));
+    FCARD_AddMapperKeys();   /* Ctrl+F5 coin, Ctrl+F6..F9 buttons 0..3 (rebindable in the mapper) */
 }
 
 void SU2000_AddConfigSection(Config *conf) {
@@ -396,8 +426,9 @@ void SU2000_AddConfigSection(Config *conf) {
     Pbool = secprop->Add_bool("pix emulation", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Run the uploaded PIX firmware: CPU A (geometry) in an MC88110 interpreter, CPU B (rasteriser)\n"
                     "in HLE with interpreter fallback. false = logging stub only.");
-    Pbool = secprop->Add_bool("pix hle", Property::Changeable::WhenIdle, true);
-    Pbool->Set_help("Replace CPU B's draw-list handlers with C++ where implemented (false = interpret all of CPU B).");
+    Pbool = secprop->Add_bool("pix hle", Property::Changeable::WhenIdle, false);
+    Pbool->Set_help("Experimental: replace CPU B's draw-list handlers with C++ where implemented (only verified on 1995 firmware).\n"
+                    "Default false = run all of CPU B's original code in the interpreter.");
     Pbool = secprop->Add_bool("pix window", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Show the PIX video channels in a separate window (SDL2 builds).");
     Pstring = secprop->Add_string("pix frame dump", Property::Changeable::WhenIdle, "");
@@ -407,10 +438,22 @@ void SU2000_AddConfigSection(Config *conf) {
                     "(board 0x2100 and 0x2102) so PIX_Open's processor test passes.");
     Pint = secprop->Add_int("pix cpu revision", Property::Changeable::WhenIdle, 9);
     Pint->Set_help("Value written to the ready words (88110 PID revision; the host requires >= 9).");
-    Pstring = secprop->Add_string("stub ports", Property::Changeable::WhenIdle, "0x210:8 0x218:8 0x280:32");
-    Pstring->Set_help("Logging-only I/O ranges base:count (format cards, network card).");
+    Pstring = secprop->Add_string("ctrl ports", Property::Changeable::WhenIdle, "0x210 0x218");
+    Pstring->Set_help("I/O base of each format/control card (CONFIG.VPC [CTRL] FORMATn IO_ADDRESS).");
+    Pstring = secprop->Add_string("ctrl mem", Property::Changeable::WhenIdle, "0xE0000 0xE0800");
+    Pstring->Set_help("Shared-memory address of each format/control card (CONFIG.VPC [CTRL] FORMATn MEM_ADDRESS).");
+    Pstring = secprop->Add_string("stub ports", Property::Changeable::WhenIdle, "0x280:32");
+    Pstring->Set_help("Logging-only I/O ranges base:count (network card).");
     Pstring = secprop->Add_string("tracker ports", Property::Changeable::WhenIdle, "0x270 0x278");
     Pstring->Set_help("I/O base of each InsideTrak card (CONFIG.VPC [TRK] TRACKERn IO_ADDRESS).");
-    Pstring = secprop->Add_string("stub windows", Property::Changeable::WhenIdle, "0xE0000:0x1000 0xC8000:0x4000");
-    Pstring->Set_help("Logging-only RAM windows base:size (format card shared memory, network card).");
+    Pbool = secprop->Add_bool("tracker calibrate", Property::Changeable::WhenIdle, false);
+    Pbool->Set_help("Debug: sweep the hand sensor position and log where DAC puts the hand.");
+    Pbool = secprop->Add_bool("tracker mouse", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Mouse aims the hand sensor; left button = trigger (Ctrl+5), right button = walk (Ctrl+6). Click the window to capture the mouse.");
+    Pstring = secprop->Add_string("tracker hand target", Property::Changeable::WhenIdle, "150 450 1750");
+    Pstring->Set_help("DAC only: where the emulated hand sensor is steered to in game coordinates (x y z).");
+    Pstring = secprop->Add_string("tracker pose", Property::Changeable::WhenIdle, "273 -2770 22636 -16384 0 0  273 -2770 22636 -16384 0 32767");
+    Pstring->Set_help("Raw InsideTrak words (x y z azimuth elevation roll) for sensor 1, then sensor 2, ...");
+    Pstring = secprop->Add_string("stub windows", Property::Changeable::WhenIdle, "0xC8000:0x4000");
+    Pstring->Set_help("Logging-only RAM windows base:size (network card).");
 }

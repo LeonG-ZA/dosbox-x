@@ -3,7 +3,35 @@
  */
 #include "pixboard.h"
 
+#include <stdarg.h>
 #include <string.h>
+
+/* ---- logging --------------------------------------------------------------------------------- */
+
+void (*pix_log_sink)(const char *msg) = NULL;
+
+void pix_logf(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (pix_log_sink) {
+        size_t n = strlen(buf);
+        while (n && buf[n - 1] == '\n') buf[--n] = 0;
+        pix_log_sink(buf);
+    } else fputs(buf, stderr);
+}
+
+/* Every trap the firmware takes (tb0/tb1/tcnd/tbnd, divide by zero ...). The PIX firmware's vectors lead to a register-dump
+ * handler, so a trap usually means the emulation went wrong somewhere before it. */
+static void pix_trap_hook(M88110 *c, unsigned vec, void *user) {
+    PixBoard *b = (PixBoard *)user;
+    static unsigned logged = 0;
+    if (logged++ < 32)
+        pix_logf("PIX: card %u CPU %c trap vector %#x at %08x (r1=%08x r2=%08x r3=%08x r29=%08x r30=%08x r31=%08x)\n", b->card_id,
+                 c == b->cpu_a ? 'A' : 'B', vec, c->pc - 4, c->r[1], c->r[2], c->r[3], c->r[29], c->r[30], c->r[31]);
+}
 
 /* ---- bus glue -------------------------------------------------------------------------------- */
 
@@ -64,7 +92,9 @@ void PixBoard::run_cpu(bool a) {
     M88110 *c = a ? cpu_a : cpu_b;
     const uint32_t w0 = be32(&dram[0]);
     c->reset((w0 >> 26) == 0x30 ? (uint32_t)((int32_t)((w0 & 0x03FFFFFFu) << 6) >> 4) : 0);
-    if (a) a_on = true;
+    c->trap_hook = pix_trap_hook;
+    c->trap_user = this;
+    if (a) { a_on = true; find_a_layout(c->pc); }
     else { b_on = true; find_b_entry_points(); }
 }
 
@@ -77,11 +107,17 @@ void PixBoard::stop() { a_on = b_on = false; }
 
 /* Locate draw32B/draw16B and the idle poll loop in MAINB without symbols:
  *   mainB loads r27 = draw32B (or.u r27,r0,HI / or r27,r27,LO), conditionally r27 = draw16B, then jsr r27;
- *   the idle loop is  ld r28,r30,$100 / cmp r29,r28,r0 / bb1 2,r29,-1.  (SFL MAINB 0xaa78-0xaad0) */
+ *   the idle loop is  ld r28,r30,$SLOT / cmp r29,r28,r0 / bb1 2,r29,-1  (SFL MAINB 0xaa78; SLOT = 0x100 in 1995
+ *   firmware, 0xAC in BOX and 0xB8 in ZONE, 1994); the draw16B choice is  ld.usr r26,[0x2104] / bb0 BIT,r26
+ *   (BIT = 9 in 1995 firmware, 8 in 1994). */
 void PixBoard::find_b_entry_points() {
     const uint32_t w0 = be32(&dram[0]);
     uint32_t mainb = 0;
     if ((w0 >> 26) == 0x30) mainb = (uint32_t)((int32_t)((w0 & 0x03FFFFFFu) << 6) >> 4);
+    mainb_pc = mainb;
+    b_lost_logged = false;
+    cpu_b->keep_hist = true;   /* cheap enough; used for the "left its code" report */
+    if (mainb) { cpu_b->guard_lo = mainb - 0x1000; cpu_b->guard_hi = mainb + 0x20000; cpu_b->guard_hit = false; }
     draw32_addr = draw16_addr = mainb_poll_pc = 0;
     uint32_t hi[32] = {0};
     for (uint32_t pc = mainb; pc < mainb + 0x1000 && pc + 8 < DRAM_SIZE; pc += 4) {
@@ -92,8 +128,13 @@ void PixBoard::find_b_entry_points() {
             const uint32_t t = hi[27] | (w & 0xFFFFu);
             if (!draw32_addr) draw32_addr = t; else if (!draw16_addr) draw16_addr = t;
         }
-        if (w == 0x179E0100u && be32(&dram[pc + 4]) == 0xF7BC7C00u && be32(&dram[pc + 8]) == 0xD85DFFFEu && !mainb_poll_pc)
+        if ((w & 0xFFFF0000u) == 0x179E0000u && be32(&dram[pc + 4]) == 0xF7BC7C00u && be32(&dram[pc + 8]) == 0xD85DFFFEu && !mainb_poll_pc) {
             mainb_poll_pc = pc;
+            slot_off = w & 0xFFFFu;
+        }
+        /* or r26,r0,$2104 ; ld.usr r26,r26,r0 ; bb0 BIT,r26,... */
+        if (w == 0x5B402104u && be32(&dram[pc + 4]) == 0xF75A1500u && (be32(&dram[pc + 8]) & 0xFC1F0000u) == 0xD01A0000u)
+            px16_bit = (be32(&dram[pc + 8]) >> 21) & 31;
     }
     disp32 = draw32_addr ? draw32_addr + 0x2C : 0;   /* ld.d r4,r28,$0: record dispatch head */
     disp16 = draw16_addr ? draw16_addr + 0x2C : 0;
@@ -102,8 +143,26 @@ void PixBoard::find_b_entry_points() {
     cpu_b->bp[0] = disp32 ? disp32 : 0xFFFFFFFFu;
     cpu_b->bp[1] = disp16 ? disp16 : 0xFFFFFFFFu;
     cpu_b->bp[2] = mainb_poll_pc ? mainb_poll_pc : 0xFFFFFFFFu;
-    fprintf(stderr, "PIX: dispatch heads %#x %#x\n", disp32, disp16);
-    fprintf(stderr, "PIX: mainB %#x draw32B %#x draw16B %#x poll %#x\n", mainb, draw32_addr, draw16_addr, mainb_poll_pc);
+    pix_logf("PIX: dispatch heads %#x %#x\n", disp32, disp16);
+    pix_logf("PIX: mainB %#x draw32B %#x draw16B %#x poll %#x slot +%#x 16-bit flag bit %u\n", mainb, draw32_addr,
+            draw16_addr, mainb_poll_pc, slot_off, px16_bit);
+}
+
+/* MAINA's buffer clear: or.u r29,r29,$4f00 followed by ld r27,r30,$ROWS (8 KB rows per buffer; +0x50 in 1995 firmware,
+ * +0x4C in 1994) - DN2 MAINA 0x4d2d8. */
+void PixBoard::find_a_layout(uint32_t maina) {
+    const uint32_t lo = maina > 0x8000 ? maina - 0x8000 : 0;
+    for (uint32_t pc = lo; pc < maina + 0x20000 && pc + 12 < DRAM_SIZE; pc += 4) {
+        if (be32(&dram[pc]) != 0x5FBD4F00u) continue;
+        for (unsigned k = 1; k <= 2; k++) {
+            const uint32_t w = be32(&dram[pc + 4 * k]);
+            if ((w & 0xFFFF0000u) == 0x177E0000u) {
+                rows_off = w & 0xFFFFu;
+                pix_logf("PIX: buffer rows at global +%#x\n", rows_off);
+                return;
+            }
+        }
+    }
 }
 
 /* VRAM row transfers (MAINA swapBuffers/clear code, e.g. DN2 0x4d2d0-0x4d380):
@@ -147,7 +206,7 @@ uint32_t PixBoard::dev_read(int cpu, uint32_t pa, unsigned size) {
     }
     if ((pa & ~1u) == 0x30000006u) return ctrl;
     unknown_io++;
-    if (unknown_log++ < 40) fprintf(stderr, "PIX: cpu %c read%u %08x\n", cpu ? 'B' : 'A', size * 8, pa);
+    if (unknown_log++ < 40) pix_logf("PIX: cpu %c read%u %08x\n", cpu ? 'B' : 'A', size * 8, pa);
     return 0;
 }
 
@@ -155,7 +214,7 @@ void PixBoard::dev_write(int cpu, uint32_t pa, uint32_t v, unsigned size) {
     if ((pa & ~1u) == 0x30000006u) { ctrl = (uint16_t)v; return; }
     if (vram_transfer(pa, true, v)) return;
     unknown_io++;
-    if (unknown_log++ < 40) fprintf(stderr, "PIX: cpu %c write%u %08x = %x\n", cpu ? 'B' : 'A', size * 8, pa, v);
+    if (unknown_log++ < 40) pix_logf("PIX: cpu %c write%u %08x = %x\n", cpu ? 'B' : 'A', size * 8, pa, v);
 }
 
 uint64_t PixBoard::run(uint64_t n) {
@@ -176,7 +235,7 @@ uint64_t PixBoard::run(uint64_t n) {
             const uint32_t disp = be32(&dram[0x200C]);
             if (disp != display_base) { display_base = disp; grab_frame(); }
             if (cpu_a->unknown_count) {
-                fprintf(stderr, "PIX: A unknown opcode %08x at %08x\n", cpu_a->last_unknown_inst, cpu_a->last_unknown_pc);
+                pix_logf("PIX: A unknown opcode %08x at %08x\n", cpu_a->last_unknown_inst, cpu_a->last_unknown_pc);
                 cpu_a->unknown_count = 0;
             }
         }
@@ -185,7 +244,7 @@ uint64_t PixBoard::run(uint64_t n) {
             uint64_t left = slice;
             while (left) {
                 const uint32_t bpc = cpu_b->pc;
-                if (bpc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7100]) == 0) break;   /* idle */
+                if (bpc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7000 + slot_off]) == 0) break;   /* idle */
                 if (bpc && (bpc == disp32 || bpc == disp16)) {
                     /* close the previous record's statistics */
                     if (cur_type >= 0) {
@@ -219,7 +278,7 @@ uint64_t PixBoard::run(uint64_t n) {
                                 if (diff || hle_r28 != cpu_b->r[28]) {
                                     compare_fail++;
                                     if (compare_fail < 20)
-                                        fprintf(stderr, "PIX compare: type %#x rec %08x: %zu bytes differ (first %#zx hle %02x lle %02x), r28 hle %08x lle %08x, lle %llu insns\n",
+                                        pix_logf("PIX compare: type %#x rec %08x: %zu bytes differ (first %#zx hle %02x lle %02x), r28 hle %08x lle %08x, lle %llu insns\n",
                                                 type & 255, regs[28], diff, first, hle[first], vram[first], hle_r28, cpu_b->r[28],
                                                 (unsigned long long)(cpu_b->icount - i0));
                                 }
@@ -230,19 +289,37 @@ uint64_t PixBoard::run(uint64_t n) {
                         if (PixRaster_Record(this, cpu_b, type, bpc == disp32)) {
                             type_stats[type & 255].hle++;
                             cur_type = -1;
-                            continue;          /* record consumed; B stays at the dispatch head */
+                            /* Resume where the original handlers return: two instructions before the dispatch head
+                             * (or.u r6 / or r6 reload the jump-table base, which handlers - and the HLE - clobber). */
+                            if (be32(&dram[(bpc - 8) & (DRAM_SIZE - 1)]) == 0x5CC00000u) cpu_b->pc = bpc - 8;
+                            continue;
                         }
                     }
                 }
                 const uint64_t k = cpu_b->run(left);
                 left -= k < left ? k : left;
-                if (!k) break;
+                if (!k || cpu_b->guard_hit) break;
             }
             if (cpu_b->unknown_count) {
-                fprintf(stderr, "PIX: B unknown opcode %08x at %08x\n", cpu_b->last_unknown_inst, cpu_b->last_unknown_pc);
+                pix_logf("PIX: B unknown opcode %08x at %08x\n", cpu_b->last_unknown_inst, cpu_b->last_unknown_pc);
                 cpu_b->unknown_count = 0;
             }
             done += cpu_b->icount - b0;
+            /* CPU B outside its own code (mainB .. mainB + 0x20000): report the draw-list record it was last given */
+            if (cpu_b->guard_hit && !b_lost_logged) {
+                b_lost_logged = true;
+                b_on = false;              /* freeze CPU B so its state can be inspected */
+                const uint32_t p = cur_ptr & (DRAM_SIZE - 1);
+                pix_logf("PIX: card %u CPU B left its code: pc %08x r1 %08x; last record type %d at %08x: %08x %08x %08x %08x; list slot %08x\n",
+                         card_id, cpu_b->pc, cpu_b->r[1], cur_type, cur_ptr, be32(&dram[p]), be32(&dram[p + 4]), be32(&dram[p + 8]),
+                         be32(&dram[p + 12]), be32(&dram[0x7000 + slot_off]));
+                pix_logf("PIX: card %u B regs r4 %08x r5 %08x r6 %08x r28 %08x r29 %08x\n", card_id, cpu_b->r[4], cpu_b->r[5],
+                         cpu_b->r[6], cpu_b->r[28], cpu_b->r[29]);
+                for (unsigned k = 0; k < 64; k++) {
+                    const unsigned j = (cpu_b->hist_i + k) & 63;
+                    pix_logf("PIX:   c%u %02u %08x %08x\n", card_id, k, cpu_b->hist_pc[j], cpu_b->hist_inst[j]);
+                }
+            }
             b_ran = cpu_b->icount != b0;
         }
         if (!a_ran && !b_ran) { idle = true; break; }
@@ -254,13 +331,16 @@ void PixBoard::hle_draw(bool bpp32) { (void)bpp32; }
 
 bool PixBoard::render_frame(PixFrame &out) {
     const uint32_t stride = be32(&dram[0x7040]);
-    const uint32_t rows = be32(&dram[0x7050]);
+    const uint32_t rows = be32(&dram[0x7000 + rows_off]);
     if ((display_base & 0xFFC00000u) != 0x40000000u || stride == 0 || stride > 8192 || rows == 0 || rows > 512) return false;
-    const bool px16 = (dram[0x2106] >> 1) & 1;
+    const bool px16 = (be32(&dram[0x2104]) >> px16_bit) & 1;
     const unsigned bpp = px16 ? 2 : 4;
     out.width = stride / bpp;
     out.height = rows * 0x2000u / stride;
     if (out.height > 1024) out.height = 1024;
+    out.band_lo = be32(&dram[0x210C]);
+    out.band_hi = be32(&dram[0x2110]);
+    if (out.band_hi <= out.band_lo || out.band_hi >= out.height) { out.band_lo = 0; out.band_hi = out.height - 1; }
     out.pixels.resize((size_t)out.width * out.height);
     for (unsigned y = 0; y < out.height; y++) {
         const uint32_t row = (display_base + y * stride) & (VRAM_SIZE - 1);
@@ -269,8 +349,9 @@ bool PixBoard::render_frame(PixFrame &out) {
             const uint8_t *p = &vram[(row + x * bpp) & (VRAM_SIZE - 1)];
             if (px16) {
                 const unsigned v = ((unsigned)p[0] << 8) | p[1];
-                dst[x] = (((v >> 8) & 15u) * 17u << 16) | (((v >> 4) & 15u) * 17u << 8) | ((v & 15u) * 17u);
-            } else dst[x] = ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+                /* bits 11..8 = blue, 7..4 = green, 3..0 = red (red and blue were swapped on screen) */
+                dst[x] = (((v >> 8) & 15u) * 17u) | (((v >> 4) & 15u) * 17u << 8) | ((v & 15u) * 17u << 16);
+            } else dst[x] = ((uint32_t)p[3] << 16) | ((uint32_t)p[2] << 8) | p[1];   /* xBGR in VRAM */
         }
     }
     return true;

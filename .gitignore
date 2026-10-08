@@ -142,3 +142,6 @@ contrib/macos/dosbox-x.plist
 /dosbox-x.conf
 /src/dosbox-x.conf
 su2000/tests/run_pix
+su2000/tests/run_pix.exe
+su2000/tests/*.obj
+su2000/re/
