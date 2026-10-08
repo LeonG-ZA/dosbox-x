@@ -51,7 +51,6 @@ bool type0a_bitmap32(PixBoard *b, M88110 *c) {
     uint32_t *r = c->r;
     const uint32_t p = r[28];
     const uint32_t flags = rd32(b, p + 0x28), mode = rd32(b, p + 0x2C);
-    { static int n = 0; if (n++ < 12) fprintf(stderr, "type0a flags %08x mode %08x hdr %08x %08x\n", flags, mode, rd32(b, p), rd32(b, p + 4)); }
     if (!((mode & 6u) || !(mode & 1u))) return false;        /* alternate path at 0xd594 */
     if (flags & 0x0F000000u) return false;                     /* 16-bit / four-colour / other sources */
     const uint32_t src0 = rd32(b, p + 4) + rd32(b, p + 0x30);
@@ -97,7 +96,6 @@ bool type0a_bitmap32(PixBoard *b, M88110 *c) {
 } // namespace
 
 bool PixRaster_Record(PixBoard *b, M88110 *cpu, int type, bool bpp32) {
-    { static int n = 0; if (n++ < 3) fprintf(stderr, "record type %#x bpp32=%d\n", type, bpp32); }
     if (!bpp32) return false;
     switch (type) {
         case 0x0A: return type0a_bitmap32(b, cpu);

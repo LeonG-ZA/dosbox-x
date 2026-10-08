@@ -244,6 +244,8 @@ uint64_t M88110::run(uint64_t n) {
         pc = ipc + 4;
         Decoded d = decode(inst);
         if (trace) fprintf(stderr, "%s\n", disasm(inst, ipc).c_str());
+        if (keep_hist) { hist_pc[hist_i & 63] = ipc; hist_inst[hist_i & 63] = inst; hist_i++; }
+        if (guard_hi && (ipc < guard_lo || ipc >= guard_hi)) { guard_hit = true; guard_hi = 0; pc = ipc; break; }
         execute(inst, d);
         r[0] = 0;
         if (had_pending) pc = target;   /* the delay-slot instruction has executed */

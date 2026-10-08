@@ -865,7 +865,11 @@ bool IsDebuggerActive(void);
 #endif
 
 /* FIXME: Re-test this code */
+bool SU2000_MouseMove(float xrel, float yrel);
+bool SU2000_MouseButton(uint8_t button, bool pressed);
+
 void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
+    if (SU2000_MouseMove(xrel, yrel)) return;
     extern bool Mouse_Vertical;
     float dx = xrel * mouse.pixelPerMickey_x;
     float dy = (Mouse_Vertical?-yrel:yrel) * mouse.pixelPerMickey_y;
@@ -1249,6 +1253,7 @@ void Mouse_Select(int x1, int y1, int x2, int y2, int w, int h, bool select) {
 #endif
 
 void Mouse_ButtonPressed(uint8_t button) {
+    if (SU2000_MouseButton(button, true)) return;
     if (!IS_PC98_ARCH && KEYBOARD_AUX_Active()) {
         switch (button) {
             case 0:
@@ -1314,6 +1319,7 @@ void Mouse_ButtonPressed(uint8_t button) {
 }
 
 void Mouse_ButtonReleased(uint8_t button) {
+    if (SU2000_MouseButton(button, false)) return;
     if (!IS_PC98_ARCH && KEYBOARD_AUX_Active()) {
         switch (button) {
             case 0:

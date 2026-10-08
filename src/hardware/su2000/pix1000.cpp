@@ -248,7 +248,19 @@ void fifo_deliver(uint16_t w) {
     for (unsigned int i = 0; i < ncards; i++)
         if (cards[i].board && (cards[i].ctrl & 0x21u)) {     /* bit5 = listen to the broadcast FIFO [inferred] */
             cards[i].board->time_us.store(t, std::memory_order_relaxed);
-            cards[i].board->fifo_push(w);
+            /* A full FIFO holds the ISA write (IOCHRDY) on the real board - nothing is ever dropped. Wait for CPU A
+             * to make room, but not forever (a stopped card would otherwise hang the emulator). */
+            if (!cards[i].board->fifo_push(w)) {
+                const auto t0 = std::chrono::steady_clock::now();
+                while (!cards[i].board->fifo_push(w)) {
+                    if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(500)) {
+                        static unsigned dropped = 0;
+                        if (dropped++ < 8) LOG_MSG("SU2000: card %u FIFO full for 500 ms, word dropped", i);
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+            }
         }
 }
 
@@ -286,6 +298,8 @@ void frame_cb(PixBoard *b, void *user) {
     std::lock_guard<std::mutex> g(c->frame_lock);
     c->frame.width = f.width;
     c->frame.height = f.height;
+    c->frame.band_lo = f.band_lo;
+    c->frame.band_hi = f.band_hi;
     c->frame.pixels.swap(f.pixels);
     c->frame_seq++;
 }
@@ -325,10 +339,12 @@ void PIX1000_Tick(void) {
         for (unsigned int i = 0; i < ncards; i++) {
             PixBoard *b = cards[i].board;
             if (!b) continue;
-            LOG_MSG("SU2000: card %u A %s pc=%08x %lluM  B %s pc=%08x %lluM  fifo %u pops %llu draws %llu ctrl %02x", i,
+            LOG_MSG("SU2000: card %u A %s pc=%08x %lluM  B %s pc=%08x %lluM  fifo %u (full hits %llu) pops %llu draws %llu ctrl %02x band %u..%u busy[214c]=%04x%04x [2158]=%04x%04x", i,
                     b->a_on ? "on" : "off", b->cpu_a->pc, (unsigned long long)(b->cpu_a->icount / 1000000),
                     b->b_on ? "on" : "off", b->cpu_b->pc, (unsigned long long)(b->cpu_b->icount / 1000000),
-                    (unsigned)b->fifo_level(), (unsigned long long)b->fifo_pops, (unsigned long long)b->draws, cards[i].ctrl);
+                    (unsigned)b->fifo_level(), (unsigned long long)b->fifo_overflow, (unsigned long long)b->fifo_pops, (unsigned long long)b->draws, cards[i].ctrl, (unsigned)((b->dram[0x210E] << 8) | b->dram[0x210F]), (unsigned)((b->dram[0x2112] << 8) | b->dram[0x2113]), (unsigned)((b->dram[0x214C] << 8) | b->dram[0x214D]), (unsigned)((b->dram[0x214E] << 8) | b->dram[0x214F]), (unsigned)((b->dram[0x2158] << 8) | b->dram[0x2159]), (unsigned)((b->dram[0x215A] << 8) | b->dram[0x215B]));
+            LOG_MSG("SU2000: card %u B r1=%08x r8=%08x r10=%08x r18=%08x r19=%08x r29=%08x r30=%08x r31=%08x", i,
+                    b->cpu_b->r[1], b->cpu_b->r[8], b->cpu_b->r[10], b->cpu_b->r[18], b->cpu_b->r[19], b->cpu_b->r[29], b->cpu_b->r[30], b->cpu_b->r[31]);
         }
     }
     for (unsigned int i = 0; i < ncards; i++)
@@ -340,6 +356,8 @@ void PIX1000_SetMode(bool emulation, bool hle_b) { emulate = emulation; hle = hl
 void PIX1000_Setup(uint32_t fifo, const uint32_t *proc_ports, unsigned int nproc,
                    uint32_t video, uint32_t mem, bool fake, unsigned int rev) {
     PIX1000_Shutdown();
+    /* board diagnostics into the DOSBox-X log (low volume; may be called from the card threads) */
+    pix_log_sink = [](const char *msg) { LOG_MSG("%s", msg); };
     fifo_port = fifo; video_port = video; procmem = mem & ~0xFFFFu;
     fake_boot = fake; fake_rev = rev;
     ncards = nproc > 4 ? 4 : nproc;

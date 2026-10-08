@@ -44,6 +44,9 @@ compared byte-for-byte with those sections (`MATCH`). Logs: `logs/*_upload/`.
 (`tools/readback_check.py`). Everything uploaded later is data in the board heap (0x150000 up: FLIC frames into `.fmvmem`,
 textures, models, palettes) written through `PIXI_TransferBlock` and referenced by address from FIFO commands. [confirmed for DN2, ETS and SP boot]
 
+**Update (local dump):** Boxing (1994-06-25), Zone Hunter (1994-07-07) and Ghost Train (1995-10-23) add three more builds, and
+1994 and 1995 firmware also differ in a few board-side globals. See `new_games_survey.md`.
+
 ### Command protocol across versions
 
 `tools/fw_dispatch.py` finds the opcode jump table in each MAINA `.data` (the longest run of `.text` pointers to `Proc*`/`Cmd*`):

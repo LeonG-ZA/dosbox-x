@@ -24,6 +24,10 @@
 
 class PixBoard;
 
+/* Board diagnostics. Default: stderr. The emulator can redirect them (DOSBox-X: its log). */
+extern void (*pix_log_sink)(const char *msg);
+void pix_logf(const char *fmt, ...);
+
 class PixBus : public M88110Bus {
 public:
     PixBus(PixBoard *b, int cpu) : board(b), which(cpu) {}
@@ -43,6 +47,10 @@ struct PixFrame {
     /* A displayed frame: 32-bit pixels 0x00RRGGBB (after the firmware's pixel format conversion) */
     unsigned width = 0, height = 0;
     std::vector<uint32_t> pixels;
+    /* Scan-line band this card is responsible for (board 0x210C / 0x2110, written by the host per card). Several cards
+     * sharing one video channel (SU2000 Solo: "proc 0x300,1,0.0,0.5 / proc 0x360,2,0.5,1.0") each own a band; the
+     * video card shows each band from its card. A card with the full screen has band 0..height-1. */
+    unsigned band_lo = 0, band_hi = 0;
 };
 
 class PixBoard {
@@ -136,6 +144,12 @@ private:
     uint32_t draw32_addr = 0, draw16_addr = 0, mainb_poll_pc = 0, disp32 = 0, disp16 = 0;
     int cur_type = -1; uint64_t cur_insn0 = 0; uint32_t cur_ptr = 0;
     void find_b_entry_points();
+    void find_a_layout(uint32_t maina);
+    /* firmware-generation dependent layout, detected from the uploaded code (defaults: 1995 firmware) */
+    uint32_t slot_off = 0x100, rows_off = 0x50;
+    uint32_t mainb_pc = 0;
+    bool b_lost_logged = false;
+    unsigned px16_bit = 9;
     void hle_draw(bool bpp32);
     uint64_t unknown_log = 0;
     uint8_t sam[0x2000];              /* VRAM serial access memory (one 8 KB row) */

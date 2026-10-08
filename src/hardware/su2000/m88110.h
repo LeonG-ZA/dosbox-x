@@ -55,6 +55,13 @@ public:
     void (*trap_hook)(M88110 *cpu, unsigned vec, void *user);  /* tb0/tb1/tcnd/tbnd traps */
     void *trap_user;
     bool trace;
+    /* optional history of the last executed instructions (debugging) */
+    bool keep_hist = false;
+    uint32_t hist_pc[64], hist_inst[64];
+    unsigned hist_i = 0;
+    /* run() stops when pc leaves [guard_lo, guard_hi) (debugging; guard_hi = 0 disables) */
+    uint32_t guard_lo = 0, guard_hi = 0;
+    bool guard_hit = false;
     uint32_t bp[4];             /* run() stops before executing an instruction at one of these (0 = unused) */
     std::string disasm(uint32_t inst, uint32_t at) const;
 

@@ -41,5 +41,15 @@ void PIX1000_SetMode(bool emulation, bool hle_b);
 void PIX1000_Tick(void);
 void TRACKER_Setup(const uint32_t *ports, unsigned int n);
 void TRACKER_Shutdown(void);
+void TRACKER_SetPose(const char *s);
+void TRACKER_SetCalibrate(bool on);
+void TRACKER_SetHandTarget(const char *s);
+void TRACKER_MouseDelta(double dx, double dy, bool head);
+void FCARD_Setup(const uint32_t *io, const uint32_t *mem, unsigned n);
+void FCARD_Shutdown(void);
+void FCARD_AddMapperKeys(void);
+void FCARD_GetStick(int &x, int &y);
+void FCARD_SetButton(unsigned bit, bool pressed);
+void TRACKER_SetMouse(bool on);
 
 #endif
