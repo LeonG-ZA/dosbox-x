@@ -31,6 +31,23 @@ logs `CD Error : (-5027) Attempt to access an invalid track number`. Music there
   `SND_StopSound` Note Off; pan / volume / pitch as controllers.
 * Host commands are 7-bit packed (`SND_HostWrite2..4`) and go through one transport routine (DAC 0xb0dce / 0xb0e85).
 
+## HLE status (sscape.cpp) [working in DAC]
+
+| Step | What the library does | Emulation |
+|---|---|---|
+| detect | ODIE index reg is 4 bits (write 0xFF, read 0x0F); reg 9 bits 7..6 = 01 means "already running" | 4-bit index |
+| firmware | DMA A of SNDSCAPE.COD (61440 bytes), then reg 9 = 0xC0 and wait for 0xFE on the host port | bytes taken from the PC DMA channel and dropped; 0xFE queued |
+| transport | each byte: wait host status bit 1, `out base+2, 0x81` (commands) or `0x85` (MIDI), `out base+3, byte` | MIDI parsed; commands collected |
+| ack / replies | IRQ 7 handler (DAC 0xb13e2) reads ODIE reg 0 (bit 1 host data, bit 7 = more), host status bit 2 = control byte. Control 0x80 = ack; other control bytes go to the reply ring read by 0xb10ae | 0x80 ack 0.2 ms after the last byte of a command; replies as control bytes |
+| queries | 0x9F firmware version (10 bytes), 0x85 free memory (6 x 4), 0x89 / 0x99 / 0x9E (1), 0x9B (3) | fixed answers |
+| 0x80 download sample | id(2) length(4) format(1: 0x60 = 8-bit) start(4) loopstart(4) loopend(4) loopend(4) pitch(3) loop(2); pitch = (log2(44100/rate)+5)*2048; data by DMA B | stored, 8-bit unsigned -> 16-bit |
+| 0x86 patch / 0x87 program | patch id(2) .. sample id at byte 13; program id(2) .. patch id at byte 4 | mapping kept |
+| play | MIDI: program change, note on (note 60 = original pitch), CC7, CC10, pitch bend | 32-voice mixer, 44.1 kHz |
+
+Start-up with sound takes about 7 s; a DAC match plays its effects. Two cards: the library opens `sound2` too if CONFIG.VPC
+defines it, and game sounds go to card = player + 1 (`SOUND_do_2D_sound`); the Solo machine has one card and the local player is
+player 0.
+
 ## Options
 
 1. **HLE (recommended first):** emulate the Soundscape's host-side ports well enough for `SND_Open`, accept the firmware

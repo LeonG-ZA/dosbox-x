@@ -186,6 +186,7 @@ void debug_game_pose(void) {
         place(head_pl, gh, pose_f[0], head_target);
         place(hand_pl, gd, pose_f[1], ht);
     }
+    if (do_log) LOG_MSG("SU2000: game gotIm %u sound cards %02x", (unsigned)mem_readb(0x17d554 + delta), (unsigned)mem_readb(0x18e036 + delta));
     if (do_log) LOG_MSG("SU2000: game head %.1f %.1f %.1f  %.3f %.3f %.3f   hand %.1f %.1f %.1f  %.3f %.3f %.3f",
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
 }
