@@ -300,6 +300,7 @@ static void SU2000_Teardown(void) {
     PIX1000_Shutdown();
     TRACKER_Shutdown();
     FCARD_Shutdown();
+    SSCAPE_Shutdown();
     su2k_display_close();
     for (auto *p : su2k_rd) delete p;
     for (auto *p : su2k_wr) delete p;
@@ -369,6 +370,7 @@ static void SU2000_OnReset(Section *sec) {
         while (ni < 2 && in1 >> t) cio[ni++] = parse_hex(t);
         while (nm < 2 && in2 >> t) cmem[nm++] = parse_hex(t);
         FCARD_Setup(cio, cmem, ni < nm ? ni : nm);
+        SSCAPE_Setup(parse_hex(s->Get_string("sound port")));
     }
 
     /* Logging-only stubs (Milestone 3 replaces these) */
@@ -442,6 +444,8 @@ void SU2000_AddConfigSection(Config *conf) {
     Pstring->Set_help("I/O base of each format/control card (CONFIG.VPC [CTRL] FORMATn IO_ADDRESS).");
     Pstring = secprop->Add_string("ctrl mem", Property::Changeable::WhenIdle, "0xE0000 0xE0800");
     Pstring->Set_help("Shared-memory address of each format/control card (CONFIG.VPC [CTRL] FORMATn MEM_ADDRESS).");
+    Pstring = secprop->Add_string("sound port", Property::Changeable::WhenIdle, "0x330");
+    Pstring->Set_help("Ensoniq Soundscape base port (CONFIG.VPC [SND] Port); 0 = off. Set [midi] mpu401=none, it uses the same port.");
     Pstring = secprop->Add_string("stub ports", Property::Changeable::WhenIdle, "0x280:32");
     Pstring->Set_help("Logging-only I/O ranges base:count (network card).");
     Pstring = secprop->Add_string("tracker ports", Property::Changeable::WhenIdle, "0x270 0x278");

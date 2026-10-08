@@ -47,6 +47,8 @@ void TRACKER_SetHandTarget(const char *s);
 void TRACKER_MouseDelta(double dx, double dy, bool head);
 void FCARD_Setup(const uint32_t *io, const uint32_t *mem, unsigned n);
 void FCARD_Shutdown(void);
+void SSCAPE_Setup(uint32_t base);
+void SSCAPE_Shutdown(void);
 void FCARD_AddMapperKeys(void);
 void FCARD_GetStick(int &x, int &y);
 void FCARD_SetButton(unsigned bit, bool pressed);
