@@ -1,0 +1,6 @@
+[submodule "vs/mbedtls"]
+	path = vs/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+[submodule "vs/libdatachannel"]
+	path = vs/libdatachannel
+	url = https://github.com/paullouisageneau/libdatachannel.git

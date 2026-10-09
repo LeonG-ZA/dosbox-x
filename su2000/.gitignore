@@ -6,3 +6,6 @@ re/*/*.asm
 re/*.symmap
 re/inventory.tsv
 __pycache__/
+# VR link https certificate and private key (created on first start)
+su2000vr.crt
+su2000vr.key
