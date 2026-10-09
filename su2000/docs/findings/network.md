@@ -66,3 +66,13 @@ Measured with two DOSBox-X instances on one PC (relay + 127.0.0.1): DAC's librar
 other's frames, and they play one match against each other (pod A's scoreboard STEALTH vs VEGA, pod B's VEGA vs
 STEALTH, instead of the computer opponent STING). DAC then sets the MICNET fade (format card register 0x94), and a
 headset microphone on pod A is heard on pod B's headset with pod B's MICNET levels.
+
+### Correction and how DAC enables linking
+
+The first two-pod test above was not a linked match: DAC transmits every frame but only reads received packets
+when its `network` setting is on (`NETWORK_handle` 0x56cf8 checks `network` 0xe2da8). The setting is row 5 of DAC's
+set-up menu (stand-alone / network master / network slave; `SETTINGS_handle`), saved in `DAC\RUNFILES\DEFAULTS.DN2`
+(line 1 = selected menu items, then game time ... `network` on line 5, `master` on line 6). One pod must be master,
+the others slave, so each emulator needs its own copy of the drive. The card also had a bug: a command-register
+write without STA / STP (a page switch) stopped reception. With both fixed, two pods (master + slave, separate drive
+copies) receive each other's frames continuously (~25,000 each in two minutes, a few dozen dropped).

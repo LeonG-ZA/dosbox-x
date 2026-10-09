@@ -75,6 +75,7 @@ struct Smc {
     IO_ReadHandleObject rd;
     IO_WriteHandleObject wr;
     unsigned long sent = 0, received = 0, dropped = 0;
+    unsigned long drop_stopped = 0, drop_filter = 0, drop_full = 0;
 };
 Smc card;
 bool installed = false;
@@ -255,8 +256,8 @@ bool accept(const uint8_t *f) {
 }
 
 void receive(const std::vector<uint8_t> &frame) {
-    if (!started() || card.pstop <= card.pstart || card.pstop > RAM_SIZE / 256) return;
-    if (frame.size() < 14 || !accept(frame.data())) return;
+    if (!started() || card.pstop <= card.pstart || card.pstop > RAM_SIZE / 256) { card.drop_stopped++; return; }
+    if (frame.size() < 14 || !accept(frame.data())) { card.drop_filter++; return; }
     size_t len = frame.size() < 60 ? 60 : frame.size();
     if (len > 1514) len = 1514;
     const unsigned count = (unsigned)len + 4;                       /* with the CRC */
@@ -265,7 +266,7 @@ void receive(const std::vector<uint8_t> &frame) {
     /* free pages between CURR and BNRY */
     unsigned avail = (card.bnry > card.curr) ? (unsigned)(card.bnry - card.curr) : ring - (unsigned)(card.curr - card.bnry);
     if (card.bnry == card.curr) avail = ring;
-    if (pages >= avail) { card.isr |= 0x10; card.dropped++; update_irq(); return; }  /* OVW */
+    if (pages >= avail) { card.isr |= 0x10; card.dropped++; card.drop_full++; update_irq(); return; }  /* OVW */
     unsigned next = card.curr + pages;
     if (next >= card.pstop) next -= ring;
     std::vector<uint8_t> data(count + 4, 0);
@@ -292,6 +293,14 @@ void deliver_event(Bitu) {
         q.swap(rx_queue);
     }
     for (const auto &f : q) receive(f);
+    static double last_stats = 0;
+    const double now = PIC_FullIndex();
+    if (now - last_stats >= 10000.0) {
+        last_stats = now;
+        LOG_MSG("SU2000: SMC 8013: %lu frames sent, %lu received, %lu dropped (ring full %lu, card stopped %lu, filtered %lu); cr %02x isr %02x imr %02x rcr %02x bnry %02x curr %02x ring %02x..%02x",
+                card.sent, card.received, card.dropped, card.drop_full, card.drop_stopped, card.drop_filter, card.cr, card.isr, card.imr,
+                card.rcr, card.bnry, card.curr, card.pstart, card.pstop);
+    }
     if (installed) PIC_AddEvent(deliver_event, 1.0);
 }
 
@@ -343,9 +352,11 @@ void reg_write(unsigned r, uint8_t v) {
     r -= 0x10;
     if (r == 0) {
         if ((v & 0x03) == 0x02 && !started()) LOG_MSG("SU2000: SMC 8013 started: ring %02x..%02x, receive config %02x, transmit config %02x", card.pstart, card.pstop, card.rcr, card.tcr);
-        card.cr = (uint8_t)(v & ~0x04);
-        if (v & 0x01) { card.isr |= 0x80; card.cr = (uint8_t)((card.cr & ~0x02) | 0x01); }
-        else if (v & 0x02) { card.isr &= 0x7F; card.cr &= (uint8_t)~0x01; }
+        /* STP / STA are commands: a write with neither (a page switch, 0x20 / 0x60) keeps the card running or stopped */
+        const uint8_t run = card.cr & 0x03;
+        card.cr = (uint8_t)((v & ~0x07) | run);
+        if (v & 0x01) { card.isr |= 0x80; card.cr = (uint8_t)((card.cr & ~0x03) | 0x01); }
+        else if (v & 0x02) { card.isr &= 0x7F; card.cr = (uint8_t)((card.cr & ~0x03) | 0x02); }
         if ((v & 0x04) && started()) transmit();
         update_irq();
         return;
