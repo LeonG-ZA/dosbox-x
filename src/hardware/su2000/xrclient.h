@@ -91,7 +91,8 @@ function angles(q){const x=q[0],y=q[1],z=q[2],w=q[3];
 
 /* WebXR */
 let session=null, gl=null, ref=null, prog=null, texs=[], loc={}, imgW=0, imgH=0, lastBtn=0, poseFrame=null;
-if(navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok; if(!ok) $('vr').textContent='VR not available';});
+function checkXR(){ navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok; $('vr').textContent=ok?'Enter VR':'VR not available (start the headset runtime, e.g. SteamVR)';}); }
+if(navigator.xr){ checkXR(); navigator.xr.addEventListener('devicechange',checkXR); setInterval(()=>{ if(!session) checkXR(); },3000); }
 else $('vr').textContent='WebXR not available (needs https or localhost)';
 $('vr').onclick=async()=>{
   session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});
