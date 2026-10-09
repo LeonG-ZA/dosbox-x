@@ -37,6 +37,8 @@ void PIX1000_Shutdown(void);
 struct PixFrame;
 bool PIX1000_GetFrame(unsigned i, PixFrame &out, uint32_t &seq);
 unsigned PIX1000_NumCards(void);
+bool PIX1000_Stereo(void);
+void PIX1000_SetStereo(bool on, float separation);
 void PIX1000_SetMode(bool emulation, bool hle_b);
 void PIX1000_Tick(void);
 void TRACKER_Setup(const uint32_t *ports, unsigned int n);

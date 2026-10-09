@@ -194,7 +194,7 @@ static uint32_t parse_hex(const std::string &s) {
 
 static bool su2k_pix_window = false;
 static std::string su2k_frame_dir;
-static uint32_t su2k_seen_seq[4];
+static uint32_t su2k_seen_seq[8];
 static unsigned su2k_dumped = 0;
 #if C_SDL2
 static SDL_Window *su2k_sdlwin = NULL;
@@ -219,16 +219,18 @@ static void su2k_display_tick(Bitu val) {
     const unsigned ncards = PIX1000_NumCards();
     /* Build video channels from the processor cards: a card whose band starts at line 0 begins a channel, a card whose
      * band starts further down contributes its lines to the previous channel (SU2000 Solo: two cards, one picture). */
-    PixFrame f[4];
+    /* With [su2000] stereo the left-eye channels come first, then the right-eye channels (twin boards). */
+    PixFrame f[8];
     unsigned n = 0;
-    bool any_new = false, have[4] = {false, false, false, false};
+    bool any_new = false, have[8] = {false, false, false, false, false, false, false, false};
     unsigned w = 0, h = 0;
-    for (unsigned i = 0; i < ncards && i < 4; i++) {
+    const unsigned nsrc = (PIX1000_Stereo() ? 2u : 1u) * (ncards < 4 ? ncards : 4u);
+    for (unsigned i = 0; i < nsrc; i++) {
         uint32_t seq = 0;
         PixFrame cf;
         if (!PIX1000_GetFrame(i, cf, seq)) continue;
         if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; }
-        if (cf.band_lo == 0 || n == 0 || f[n - 1].width != cf.width) {
+        if (cf.band_lo == 0 || n == 0 || f[n - 1].width != cf.width || (PIX1000_Stereo() && i == ncards)) {
             f[n] = cf;
             have[n] = true;
             n++;
@@ -251,7 +253,7 @@ static void su2k_display_tick(Bitu val) {
             if (fp) {
                 fprintf(fp, "P6\n%u %u\n255\n", w, h);
                 for (unsigned y = 0; y < h; y++)
-                    for (unsigned i = 0; i < n && i < 4; i++) {
+                    for (unsigned i = 0; i < n && i < 8; i++) {
                         if (!have[i]) continue;
                         for (unsigned x = 0; x < f[i].width; x++) {
                             const uint32_t p = y < f[i].height ? f[i].pixels[(size_t)y * f[i].width + x] : 0;
@@ -277,7 +279,7 @@ static void su2k_display_tick(Bitu val) {
             if (su2k_tex) {
                 su2k_canvas.assign((size_t)w * h, 0);
                 unsigned x0 = 0;
-                for (unsigned i = 0; i < n && i < 4; i++) {
+                for (unsigned i = 0; i < n && i < 8; i++) {
                     if (!have[i]) continue;
                     for (unsigned y = 0; y < f[i].height && y < h; y++)
                         memcpy(&su2k_canvas[(size_t)y * w + x0], &f[i].pixels[(size_t)y * f[i].width], f[i].width * 4);
@@ -342,6 +344,7 @@ static void SU2000_OnReset(Section *sec) {
         while (nproc < 4 && in >> tok) procs[nproc++] = parse_hex(tok);
     }
     PIX1000_SetMode(s->Get_bool("pix emulation"), s->Get_bool("pix hle"));
+    PIX1000_SetStereo(s->Get_bool("stereo"), (float)s->Get_double("stereo separation"));
     su2k_pix_window = s->Get_bool("pix window");
     su2k_frame_dir = s->Get_string("pix frame dump");
     memset(su2k_seen_seq, 0, sizeof(su2k_seen_seq));
@@ -407,6 +410,7 @@ void SU2000_AddConfigSection(Config *conf) {
     Prop_bool *Pbool;
     Prop_string *Pstring;
     Prop_int *Pint;
+    Prop_double *Pdouble;
 
     Pbool = secprop->Add_bool("enable", Property::Changeable::WhenIdle, false);
     Pbool->Set_help("Enable the Virtuality SU2000 hardware (PIX 1000 graphics, format card, InsideTrak) research stubs.\n"
@@ -431,6 +435,11 @@ void SU2000_AddConfigSection(Config *conf) {
     Pbool = secprop->Add_bool("pix hle", Property::Changeable::WhenIdle, false);
     Pbool->Set_help("Experimental: replace CPU B's draw-list handlers with C++ where implemented (only verified on 1995 firmware).\n"
                     "Default false = run all of CPU B's original code in the interpreter.");
+    Pbool = secprop->Add_bool("stereo", Property::Changeable::WhenIdle, false);
+    Pbool->Set_help("Render a second (right-eye) image for every PIX card: each card gets a twin board fed the same commands,\n"
+                    "and both cameras are moved sideways by half the stereo separation. Doubles the PIX emulation work.");
+    Pdouble = secprop->Add_double("stereo separation", Property::Changeable::WhenIdle, 65.0);
+    Pdouble->Set_help("Distance between the two eye cameras in game units (DAC: about 1 unit = 1 mm).");
     Pbool = secprop->Add_bool("pix window", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Show the PIX video channels in a separate window (SDL2 builds).");
     Pstring = secprop->Add_string("pix frame dump", Property::Changeable::WhenIdle, "");
