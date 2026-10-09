@@ -44,3 +44,25 @@ DN2, BOX, GHOST and ZONE have no NET library. `SMC\EZSTART.EXE` is SMC's own car
   module already contains one), and carry the raw frames between emulator instances, for example through a small UDP
   "hub" (frames are multicast/broadcast, so a hub that forwards everything is enough), or through pcap on a real LAN.
   DOSBox-X's slirp backend only carries IP and would not forward these frames.
+
+## Emulation (`[su2000] network`)
+
+`smc8013.cpp` emulates the card and links emulators over UDP (no IPX, no game changes):
+
+* ASIC: MSR (reset, memory enable), ICR bit 0 = 16-bit card (read only), general registers incl. GP2 (passes the
+  83C583 write test), station address 00:00:C0:xx:xx:xx at +8..13, board id 0x04 (revision 2), checksum.
+* 8390 in shared-memory mode: pages 0..2, transmit from card RAM (TPSR / TBCR, CR 0x26), receive ring PSTART..PSTOP
+  with the 4-byte header (count includes 4 CRC bytes), BNRY / CURR, overflow, ISR / IMR and IRQ 5; loopback transmit
+  config (TCR 4, used while the library initialises) sends nothing. 16 KB of card RAM at 0xC8000. Broadcast and every
+  multicast are accepted when RCR allows them (the library filters by group).
+* Link: `network = relay:<port>` on one emulator (it also forwards every datagram to all other pods),
+  `network = <host>:<port>` on the others; datagrams "SU2N" + frame, "SU2K" keep-alive, "SU2V" headset microphone
+  packets (the pods' analogue MICNET line).
+* The game's CONFIG.VPC needs the `[NET]` section of the original files (IRQ 5, IO_ADDRESS 0x280, MEM_ADDRESS 0xC8000);
+  the working copies had it removed.
+
+Measured with two DOSBox-X instances on one PC (relay + 127.0.0.1): DAC's library initialises the card (ring
+06h..20h, receive config 0Eh), sends to the multicast group 01:44:41:43:30:31 ("\x01DAC01"), both pods receive each
+other's frames, and they play one match against each other (pod A's scoreboard STEALTH vs VEGA, pod B's VEGA vs
+STEALTH, instead of the computer opponent STING). DAC then sets the MICNET fade (format card register 0x94), and a
+headset microphone on pod A is heard on pod B's headset with pod B's MICNET levels.

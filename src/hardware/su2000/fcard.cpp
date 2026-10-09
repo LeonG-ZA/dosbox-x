@@ -159,6 +159,11 @@ void io_write(Bitu port, Bitu val, Bitu iolen) {
             c->mix_have_reg = false;
             const unsigned reg = c->mix_reg & 0x1Fu, side = c->mix_reg & 0x60u;
             if (reg == 0x14 && (val & 0x1Fu)) c->micnet_used = true;
+            if (reg == 0x14) {
+                static unsigned n = 0;
+                if (n++ < 40) LOG_MSG("SU2000: format card %u MICNET %s = %u", (unsigned)(c - cards),
+                                      side == 0x20 ? "left" : side == 0x40 ? "right" : "both", (unsigned)(val & 0x1Fu));
+            }
             if (side != 0x40) c->mix[reg][0] = (uint8_t)val;
             if (side != 0x20) c->mix[reg][1] = (uint8_t)val;
             static unsigned logged = 0;

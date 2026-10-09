@@ -1537,6 +1537,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\hardware\su2000\m88110.cpp" />
     <ClCompile Include="..\src\hardware\su2000\fcard.cpp" />
     <ClCompile Include="..\src\hardware\su2000\sscape.cpp" />
+    <ClCompile Include="..\src\hardware\su2000\smc8013.cpp" />
     <ClCompile Include="..\src\hardware\su2000\xrserver.cpp">
       <AdditionalIncludeDirectories Condition="'$(Platform)'=='x64'">$(ProjectDir)..\obj\webrtc\install\include;$(ProjectDir)libdatachannel\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>

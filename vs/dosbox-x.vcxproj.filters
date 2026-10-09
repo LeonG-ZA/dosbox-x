@@ -435,6 +435,9 @@
     <ClCompile Include="..\src\hardware\su2000\sscape.cpp">
       <Filter>Sources\hardware</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\hardware\su2000\smc8013.cpp">
+      <Filter>Sources\hardware</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\hardware\su2000\xrserver.cpp">
       <Filter>Sources\hardware</Filter>
     </ClCompile>
