@@ -60,3 +60,12 @@ player 0.
 
 Note: DOSBox-X's own MPU-401 sits at 0x330, the same port the cabinet's Soundscape uses; an emulation must take the
 port over when `[su2000]` is enabled.
+
+## Second card (two-player cabinet)
+
+`[su2000] sound port` takes up to two cards as `port:irq[:dma]`. The first drive's CONFIG.VPC has sound1 at 0x330
+IRQ 12 and sound2 at 0x350 IRQ 7 (`DMA 1,3`), so `dosbox-su2000.conf` uses `0x330:12:1 0x350:7:3` and turns off the
+PS/2 mouse (`[keyboard] aux=false`, IRQ 12). Each card has its own state, IRQ, DMA channel and mixer channel (SSCAPE,
+SSCAPE2). Measured: DN2 now starts both cards, downloads its samples to each without errors (before: "Error installing
+sound ... on card 1" for every sample and no picture after the PIX banner) and runs its attract mode. With the VR link
+each player's headset gets its own card (44.1 kHz); with one card it gets the whole DOSBox-X mix.

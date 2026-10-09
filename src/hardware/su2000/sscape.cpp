@@ -65,6 +65,8 @@ struct Soundscape {
     uint8_t host_ctrl = 0;
     std::deque<uint16_t> to_pc;               /* bytes for the PC; bit 8 = control byte (host status bit 2) */
     unsigned irq = 7;
+    int dma = -1;                             /* 8-bit DMA channel, -1 = the first unmasked one */
+    unsigned index = 0;
     IO_ReadHandleObject rd;
     IO_WriteHandleObject wr;
     unsigned logged = 0;
@@ -83,7 +85,12 @@ struct Soundscape {
     MixerChannel *mix = nullptr;
 };
 
-Soundscape ss;
+/* Up to two cards (the two-player cabinet has one per player: CONFIG.VPC sound1 / sound2). The handlers select the card
+   they work on through ssp; the code below uses `ss` for it. */
+Soundscape cards[2];
+unsigned ncards = 0;
+Soundscape *ssp = &cards[0];
+#define ss (*ssp)
 bool installed = false;
 
 void trace(const char *what, Bitu port, Bitu val) {
@@ -235,12 +242,17 @@ void mix_handler(Bitu len) {
         out[2 * i + 1] = (int16_t)(r > 32767 ? 32767 : (r < -32768 ? -32768 : r));
     }
     ss.mix->AddSamples_s16(len, out.data());
-    /* debug: raw 16-bit stereo 44.1 kHz dump when SU2K_SSCAPE_RAW names a file */
+    /* VR link: with two cards each player's headset gets its own card */
+    if (ncards > 1) XR_CardAudio(ss.index, MIX_RATE, (unsigned)len, out.data());
+    /* debug: raw 16-bit stereo 44.1 kHz dump of card 1 when SU2K_SSCAPE_RAW names a file */
     static FILE *dump = nullptr;
     static bool tried = false;
     if (!tried) { tried = true; const char *p = getenv("SU2K_SSCAPE_RAW"); if (p && *p) dump = fopen(p, "wb"); }
-    if (dump) fwrite(out.data(), sizeof(int16_t), out.size(), dump);
+    if (dump && ss.index == 0) fwrite(out.data(), sizeof(int16_t), out.size(), dump);
 }
+
+void mix_card0(Bitu len) { ssp = &cards[0]; mix_handler(len); }
+void mix_card1(Bitu len) { ssp = &cards[1]; mix_handler(len); }
 
 /* Card -> PC: queue a byte and interrupt. The SND library's IRQ handler (DAC.EXE 0xb13e2) reads ODIE reg 0, sees bit 1
    (host port), and takes control bytes (host status bit 2) as acknowledgements (0x80) or replies. */
@@ -250,7 +262,8 @@ void send_to_pc(uint8_t b, bool control) {
 }
 
 /* Every command the library sends waits for an acknowledgement; act on it and answer once the PC has stopped writing. */
-void ack_event(Bitu) {
+void ack_event(Bitu card) {
+    ssp = &cards[card & 1];
     handle_command();
     ss.cmd.clear();
     send_to_pc(0x80, true);
@@ -260,6 +273,7 @@ void ack_event(Bitu) {
    DMA A carries the firmware (dropped); DMA B carries sample data for the last download command. */
 void start_dma(unsigned which) {
     for (uint8_t c = 0; c < 4; c++) {
+        if (ss.dma >= 0 && c != (uint8_t)ss.dma) continue;
         DmaChannel *ch = GetDMAChannel(c);
         if (!ch || ch->masked) continue;
         const Bitu n = (Bitu)ch->currcnt + 1u;
@@ -280,8 +294,13 @@ void start_dma(unsigned which) {
     ss.dma_done[which] = true;
 }
 
+void select_card(Bitu port) {
+    ssp = (ncards > 1 && port >= cards[1].base && port < cards[1].base + 8) ? &cards[1] : &cards[0];
+}
+
 Bitu ss_read(Bitu port, Bitu iolen) {
     (void)iolen;
+    select_card(port);
     Bitu v = 0xFF;
     switch (port - ss.base) {
         case 1: v = 0x80; break;                                          /* MPU status: no data, can write */
@@ -307,6 +326,7 @@ Bitu ss_read(Bitu port, Bitu iolen) {
 
 void ss_write(Bitu port, Bitu val, Bitu iolen) {
     SU2K_Log(SU2K_IO_WRITE, (uint8_t)iolen, (uint32_t)port, (uint32_t)val);
+    select_card(port);
     switch (port - ss.base) {
         case 0: midi_byte((uint8_t)val); break;                           /* MIDI UART */
         case 2: ss.host_ctrl = (uint8_t)val; break;
@@ -314,8 +334,8 @@ void ss_write(Bitu port, Bitu val, Bitu iolen) {
             if (ss.host_ctrl == 0x85) { midi_byte((uint8_t)val); break; }
             if ((val & 0x80u) && !ss.cmd.empty()) { handle_command(); ss.cmd.clear(); }
             ss.cmd.push_back((uint8_t)val);
-            PIC_RemoveEvents(ack_event);
-            PIC_AddEvent(ack_event, 0.2);
+            PIC_RemoveSpecificEvents(ack_event, ss.index);
+            PIC_AddEvent(ack_event, 0.2, ss.index);
             break;
         case 4: ss.odie_index = (uint8_t)(val & 0x0Fu); break;
         case 5:
@@ -335,25 +355,61 @@ void ss_write(Bitu port, Bitu val, Bitu iolen) {
 
 } // namespace
 
-void SSCAPE_Setup(uint32_t base) {
+/* spec: "port[:irq[:dma]] ..." for up to two cards, e.g. "0x330:7" (Solo) or "0x330:12:1 0x350:7:3" (two-player
+   cabinet, CONFIG.VPC sound1 / sound2); "0" = none. */
+void SSCAPE_Setup(const char *spec) {
     SSCAPE_Shutdown();
-    if (!base) return;
-    ss.base = base;
-    ss.to_pc.clear();
-    ss.logged = 0;
-    ss.rd.Install(base, ss_read, IO_MA, 8);
-    ss.wr.Install(base, ss_write, IO_MA, 8);
-    ss.mix = MIXER_AddChannel(mix_handler, MIX_RATE, "SSCAPE");
-    ss.mix->Enable(true);
-    installed = true;
-    LOG_MSG("SU2000: Soundscape (HLE) at %03xh, wall %.1f s", base, wall());
+    ncards = 0;
+    while (spec && *spec && ncards < 2) {
+        char *e;
+        const unsigned long base = strtoul(spec, &e, 0);
+        if (e == spec) { spec++; continue; }
+        unsigned long irq = 7;
+        long dma = -1;
+        if (*e == ':') { irq = strtoul(e + 1, &e, 0); if (*e == ':') dma = strtol(e + 1, &e, 0); }
+        spec = e;
+        if (!base) continue;
+        Soundscape &c = cards[ncards];
+        c.base = (uint32_t)base;
+        c.irq = (unsigned)irq;
+        c.dma = (int)(dma >= 0 && dma < 4 ? dma : -1);
+        c.index = ncards;
+        c.to_pc.clear();
+        c.cmd.clear();
+        c.samples.clear();
+        c.patch_sample.clear();
+        c.program_patch.clear();
+        c.loading = -1;
+        c.logged = 0;
+        c.firmware_done = false;
+        c.dma_done[0] = c.dma_done[1] = false;
+        c.odie_index = 0;
+        memset(c.odie, 0, sizeof(c.odie));
+        for (Voice &v : c.voices) v.on = false;
+        c.rd.Install(c.base, ss_read, IO_MA, 8);
+        c.wr.Install(c.base, ss_write, IO_MA, 8);
+        c.mix = MIXER_AddChannel(ncards ? mix_card1 : mix_card0, MIX_RATE, ncards ? "SSCAPE2" : "SSCAPE");
+        c.mix->Enable(true);
+        LOG_MSG("SU2000: Soundscape %u (HLE) at %03xh IRQ %u%s, wall %.1f s", ncards + 1, c.base, c.irq,
+                c.dma >= 0 ? (c.dma == 1 ? " DMA 1" : c.dma == 3 ? " DMA 3" : c.dma == 0 ? " DMA 0" : " DMA 2") : "", wall());
+        ncards++;
+    }
+    ssp = &cards[0];
+    installed = ncards > 0;
 }
+
+unsigned SSCAPE_Cards(void) { return ncards; }
 
 void SSCAPE_Shutdown(void) {
     if (!installed) return;
-    ss.rd.Uninstall();
-    ss.wr.Uninstall();
-    if (ss.mix) { MIXER_DelChannel(ss.mix); ss.mix = nullptr; }
-    for (Voice &v : ss.voices) v.on = false;
+    PIC_RemoveEvents(ack_event);
+    for (unsigned i = 0; i < ncards; i++) {
+        Soundscape &c = cards[i];
+        c.rd.Uninstall();
+        c.wr.Uninstall();
+        if (c.mix) { MIXER_DelChannel(c.mix); c.mix = nullptr; }
+        for (Voice &v : c.voices) v.on = false;
+    }
+    ncards = 0;
     installed = false;
 }
