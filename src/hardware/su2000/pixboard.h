@@ -91,6 +91,8 @@ public:
     /* configuration */
     bool hle_b = true;
     unsigned card_id = 0;
+    uint64_t view_hits = 0;     /* views shifted by eye_shift */
+    float eye_shift = 0.0f;     /* stereo: camera shift along its x axis, applied to every stored view (0 = off) */
     unsigned insns_per_line = 3200;   /* 64 us video line at ~50 MIPS [inferred clock] */
     unsigned lines_per_frame = 312;   /* PAL non-interlaced, 64 us per line */
     std::string frame_dir;            /* harness: write PPM frames here */
@@ -145,6 +147,10 @@ private:
     int cur_type = -1; uint64_t cur_insn0 = 0; uint32_t cur_ptr = 0;
     void find_b_entry_points();
     void find_a_layout(uint32_t maina);
+    /* Stereo: shift of the camera along its own x axis applied whenever CPU A stores a view (0 = off).
+       view_hook[] = ends of ProcView / ProcViewMAT (12 floats) and ProcViewPOS (3 floats). */
+    uint32_t view_hook[3] = { 0, 0, 0 };
+    void find_view_hooks(uint32_t maina);
     /* firmware-generation dependent layout, detected from the uploaded code (defaults: 1995 firmware) */
     uint32_t slot_off = 0x100, rows_off = 0x50;
     uint32_t mainb_pc = 0;

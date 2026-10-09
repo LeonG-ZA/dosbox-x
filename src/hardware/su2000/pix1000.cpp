@@ -79,6 +79,9 @@ struct ProcCard {
 };
 
 ProcCard cards[4];
+ProcCard twins[4];                          /* stereo: right-eye copy of each card, fed the same host writes */
+bool stereo = false;
+float stereo_sep = 65.0f;
 bool emulate = true;
 bool hle = true;
 unsigned int ncards = 0;
@@ -117,6 +120,7 @@ public:
         for (unsigned int i = 0; i < ncards; i++) {
             if (!(cards[i].ctrl & 0x10)) continue;
             cards[i].put16(board(addr, &cards[i]) & ~1u, v);
+            if (twins[i].board) twins[i].put16(board(addr, &cards[i]) & ~1u, v);
             if (!any) SU2K_Log(SU2K_MEM_WRITE, 2, (uint32_t)addr, v, board(addr, &cards[i]));
             any = true;
         }
@@ -133,7 +137,10 @@ public:
     }
     void writeb(PhysPt addr, uint8_t val) override {
         for (unsigned int i = 0; i < ncards; i++)
-            if (cards[i].ctrl & 0x10) cards[i].at(board(addr, &cards[i]) ^ 1u) = val;
+            if (cards[i].ctrl & 0x10) {
+                cards[i].at(board(addr, &cards[i]) ^ 1u) = val;
+                if (twins[i].board) twins[i].at(board(addr, &cards[i]) ^ 1u) = val;
+            }
         ProcCard *c = window_card();
         SU2K_Log(SU2K_MEM_WRITE, 1, (uint32_t)addr, val, c ? board(addr, c) : 0xFFFFFFFFu);
     }
@@ -170,6 +177,7 @@ void boot_handshake(ProcCard &c, unsigned int idx, bool cpu_a) {
     if (c.board) {
         std::lock_guard<std::mutex> g(c.lock);
         c.board->run_cpu(cpu_a);
+        if (idx < 4 && twins[idx].board) { std::lock_guard<std::mutex> g2(twins[idx].lock); twins[idx].board->run_cpu(cpu_a); }
         LOG_MSG("SU2000: PIX card %u CPU %c started", idx, cpu_a ? 'A' : 'B');
         return;
     }
@@ -211,7 +219,10 @@ void proc_write(Bitu port, Bitu val, Bitu iolen) {
         case 0: {
             const uint8_t old = c->ctrl;
             c->ctrl = v;
-            if (c->board && !(v & 0x03) && (old & 0x03)) { std::lock_guard<std::mutex> g(c->lock); c->board->stop(); }
+            if (c->board && !(v & 0x03) && (old & 0x03)) {
+                { std::lock_guard<std::mutex> g(c->lock); c->board->stop(); }
+                if (twins[idx].board) { std::lock_guard<std::mutex> g(twins[idx].lock); twins[idx].board->stop(); }
+            }
             if ((v & 0x02) && !(old & 0x02)) boot_handshake(*c, idx, false);
             if ((v & 0x01) && !(old & 0x01)) boot_handshake(*c, idx, true);
             break;
@@ -221,6 +232,7 @@ void proc_write(Bitu port, Bitu val, Bitu iolen) {
         case 3: case 4:
             SU2K_Log(SU2K_EVENT, 1, SU2K_EV_RESET, v, (idx << 8u) | r);
             if (c->board) { std::lock_guard<std::mutex> g(c->lock); c->board->stop(); }
+            if (twins[idx].board) { std::lock_guard<std::mutex> g(twins[idx].lock); twins[idx].board->stop(); }
             break;
         default: break;
     }
@@ -242,25 +254,29 @@ void fifo_log(Bitu val, Bitu iolen) {
     SU2K_Log(SU2K_FIFO, (uint8_t)iolen, mem_readd(sp + 12), (uint32_t)val, mem_readd(sp + 8));
 }
 
+/* A full FIFO holds the ISA write (IOCHRDY) on the real board - nothing is ever dropped. Wait for CPU A to make room,
+ * but not forever (a stopped card would otherwise hang the emulator). */
+void push_word(PixBoard *b, uint16_t w, unsigned i, double t) {
+    b->time_us.store(t, std::memory_order_relaxed);
+    if (b->fifo_push(w)) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!b->fifo_push(w)) {
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(500)) {
+            static unsigned dropped = 0;
+            if (dropped++ < 8) LOG_MSG("SU2000: card %u FIFO full for 500 ms, word dropped", i);
+            break;
+        }
+        std::this_thread::yield();
+    }
+}
+
 void fifo_deliver(uint16_t w) {
     if (!emulate) return;
     const double t = PIC_FullIndex() * 1000.0;
     for (unsigned int i = 0; i < ncards; i++)
         if (cards[i].board && (cards[i].ctrl & 0x21u)) {     /* bit5 = listen to the broadcast FIFO [inferred] */
-            cards[i].board->time_us.store(t, std::memory_order_relaxed);
-            /* A full FIFO holds the ISA write (IOCHRDY) on the real board - nothing is ever dropped. Wait for CPU A
-             * to make room, but not forever (a stopped card would otherwise hang the emulator). */
-            if (!cards[i].board->fifo_push(w)) {
-                const auto t0 = std::chrono::steady_clock::now();
-                while (!cards[i].board->fifo_push(w)) {
-                    if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(500)) {
-                        static unsigned dropped = 0;
-                        if (dropped++ < 8) LOG_MSG("SU2000: card %u FIFO full for 500 ms, word dropped", i);
-                        break;
-                    }
-                    std::this_thread::yield();
-                }
-            }
+            push_word(cards[i].board, w, i, t);
+            if (twins[i].board) push_word(twins[i].board, w, i, t);
         }
 }
 
@@ -321,15 +337,19 @@ void video_write(Bitu port, Bitu val, Bitu iolen) {
 
 /* Main-thread access to the latest frame of card i (for the display window / frame dumps). */
 bool PIX1000_GetFrame(unsigned i, PixFrame &out, uint32_t &seq) {
-    if (i >= ncards || !cards[i].board) return false;
-    std::lock_guard<std::mutex> g(cards[i].frame_lock);
-    if (!cards[i].frame.width) return false;
-    out = cards[i].frame;
-    seq = cards[i].frame_seq.load();
+    /* i >= ncards: right-eye twin of card i - ncards (stereo) */
+    ProcCard *c = i < ncards ? &cards[i] : (i < 2 * ncards ? &twins[i - ncards] : NULL);
+    if (!c || !c->board) return false;
+    std::lock_guard<std::mutex> g(c->frame_lock);
+    if (!c->frame.width) return false;
+    out = c->frame;
+    seq = c->frame_seq.load();
     return true;
 }
 
 unsigned PIX1000_NumCards(void) { return ncards; }
+bool PIX1000_Stereo(void) { return stereo && emulate; }
+void PIX1000_SetStereo(bool on, float separation) { stereo = on; stereo_sep = separation; }
 
 void PIX1000_Tick(void) {
     const double t = PIC_FullIndex() * 1000.0;
@@ -343,12 +363,15 @@ void PIX1000_Tick(void) {
                     b->a_on ? "on" : "off", b->cpu_a->pc, (unsigned long long)(b->cpu_a->icount / 1000000),
                     b->b_on ? "on" : "off", b->cpu_b->pc, (unsigned long long)(b->cpu_b->icount / 1000000),
                     (unsigned)b->fifo_level(), (unsigned long long)b->fifo_overflow, (unsigned long long)b->fifo_pops, (unsigned long long)b->draws, cards[i].ctrl, (unsigned)((b->dram[0x210E] << 8) | b->dram[0x210F]), (unsigned)((b->dram[0x2112] << 8) | b->dram[0x2113]), (unsigned)((b->dram[0x214C] << 8) | b->dram[0x214D]), (unsigned)((b->dram[0x214E] << 8) | b->dram[0x214F]), (unsigned)((b->dram[0x2158] << 8) | b->dram[0x2159]), (unsigned)((b->dram[0x215A] << 8) | b->dram[0x215B]));
+            LOG_MSG("SU2000: card %u view hooks hit %llu (twin %llu)", i, (unsigned long long)b->view_hits, twins[i].board ? (unsigned long long)twins[i].board->view_hits : 0ull);
             LOG_MSG("SU2000: card %u B r1=%08x r8=%08x r10=%08x r18=%08x r19=%08x r29=%08x r30=%08x r31=%08x", i,
                     b->cpu_b->r[1], b->cpu_b->r[8], b->cpu_b->r[10], b->cpu_b->r[18], b->cpu_b->r[19], b->cpu_b->r[29], b->cpu_b->r[30], b->cpu_b->r[31]);
         }
     }
-    for (unsigned int i = 0; i < ncards; i++)
+    for (unsigned int i = 0; i < ncards; i++) {
         if (cards[i].board) cards[i].board->time_us.store(t, std::memory_order_relaxed);
+        if (twins[i].board) twins[i].board->time_us.store(t, std::memory_order_relaxed);
+    }
 }
 
 void PIX1000_SetMode(bool emulation, bool hle_b) { emulate = emulation; hle = hle_b; }
@@ -374,6 +397,19 @@ void PIX1000_Setup(uint32_t fifo, const uint32_t *proc_ports, unsigned int nproc
             cards[i].board->frame_user = &cards[i];
             cards[i].quit = false;
             cards[i].thread = new std::thread(card_thread, &cards[i], i);
+            if (stereo) {
+                /* left eye = the real card, right eye = a twin; the camera moves by half the separation each way */
+                cards[i].board->eye_shift = -0.5f * stereo_sep;
+                twins[i].io = proc_ports[i];
+                twins[i].board = new PixBoard();
+                twins[i].board->card_id = i;
+                twins[i].board->hle_b = hle;
+                twins[i].board->eye_shift = 0.5f * stereo_sep;
+                twins[i].board->frame_cb = frame_cb;
+                twins[i].board->frame_user = &twins[i];
+                twins[i].quit = false;
+                twins[i].thread = new std::thread(card_thread, &twins[i], i);
+            }
         } else cards[i].ram.assign(BOARD_RAM, 0);
         rd_proc[i].Install(cards[i].io, proc_read, IO_MA, 8);
         wr_proc[i].Install(cards[i].io, proc_write, IO_MA, 8);
@@ -409,6 +445,14 @@ void PIX1000_Shutdown(void) {
         }
         delete cards[i].board;
         cards[i].board = NULL;
+        if (twins[i].thread) {
+            twins[i].quit = true;
+            twins[i].thread->join();
+            delete twins[i].thread;
+            twins[i].thread = NULL;
+        }
+        delete twins[i].board;
+        twins[i].board = NULL;
         cards[i].ram.clear();
         cards[i].ram.shrink_to_fit();
         cards[i].high.clear();

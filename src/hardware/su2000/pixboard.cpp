@@ -94,7 +94,7 @@ void PixBoard::run_cpu(bool a) {
     c->reset((w0 >> 26) == 0x30 ? (uint32_t)((int32_t)((w0 & 0x03FFFFFFu) << 6) >> 4) : 0);
     c->trap_hook = pix_trap_hook;
     c->trap_user = this;
-    if (a) { a_on = true; find_a_layout(c->pc); }
+    if (a) { a_on = true; find_a_layout(c->pc); find_view_hooks(c->pc); }
     else { b_on = true; find_b_entry_points(); }
 }
 
@@ -165,6 +165,29 @@ void PixBoard::find_a_layout(uint32_t maina) {
     }
 }
 
+/* MAINA view commands (DAC 0x4bb40 ProcViewMAT, DN2 equivalent):
+ *   bsr waitWordFIFO ; mak r29,r29,<7> ; add r2,r2,r29        r2 = view record (128 bytes per view)
+ *   then N x (bsr waitLongFIFO ; st r29,r2,$off)                 MAT: 12 floats at 0..0x2c, ROT: 9 at 0..0x20, POS: 3 at 0x24..0x2c
+ * The hook address is the instruction after the last store; floats 9..11 (+0x24..+0x2c) are the translation. */
+void PixBoard::find_view_hooks(uint32_t maina) {
+    view_hook[0] = view_hook[1] = view_hook[2] = 0;
+    unsigned nh = 0;
+    const uint32_t lo = maina > 0x8000 ? maina - 0x8000 : 0;
+    for (uint32_t pc = lo; pc < maina + 0x20000 && pc + 0x80 < DRAM_SIZE; pc += 4) {
+        if (be32(&dram[pc]) != 0xF3BDA007u || be32(&dram[pc + 4]) != 0xF442701Du) continue;
+        uint32_t p = pc + 8, first = 0xFFFFFFFFu, last = 0;
+        unsigned n = 0;
+        while ((be32(&dram[p]) >> 26) == 0x32 && (be32(&dram[p + 4]) & 0xFFFF0000u) == 0x27A20000u) {
+            const uint32_t off = be32(&dram[p + 4]) & 0xFFFFu;
+            if (first == 0xFFFFFFFFu) first = off;
+            last = off; n++; p += 8;
+        }
+        if (((n == 12 && first == 0) || (n == 3 && first == 0x24)) && last == 0x2C && nh < 3) view_hook[nh++] = p;
+    }
+    for (unsigned k = 0; k < 3; k++) cpu_a->bp[k] = view_hook[k] ? view_hook[k] : 0xFFFFFFFFu;
+    pix_logf("PIX: view hooks %#x %#x %#x\n", view_hook[0], view_hook[1], view_hook[2]);
+}
+
 /* VRAM row transfers (MAINA swapBuffers/clear code, e.g. DN2 0x4d2d0-0x4d380):
  *   read  0x48xxxxxx / 0x49xxxxxx : read transfer - load the 8 KB VRAM row containing xxxxxx into the SAM
  *   write 0x4Fxxxxxx              : write transfer - store the SAM into that row, bits enabled by the value
@@ -232,6 +255,17 @@ uint64_t PixBoard::run(uint64_t n) {
             done += k;
             clock += k;
             a_ran = true;
+            if (eye_shift != 0.0f && cpu_a->pc && (cpu_a->pc == view_hook[0] || cpu_a->pc == view_hook[1] || cpu_a->pc == view_hook[2])) {
+                /* a view was just stored at r2: move the camera sideways (view-space x translation) */
+                const uint32_t a = (cpu_a->r[2] + 0x24u) & (DRAM_SIZE - 1);
+                uint32_t bits = be32(&dram[a]);
+                float x;
+                memcpy(&x, &bits, 4);
+                x += eye_shift;   /* measured: the stored x grows when the camera moves right */
+                memcpy(&bits, &x, 4);
+                dram[a] = (uint8_t)(bits >> 24); dram[a + 1] = (uint8_t)(bits >> 16); dram[a + 2] = (uint8_t)(bits >> 8); dram[a + 3] = (uint8_t)bits;
+                view_hits++;
+            }
             const uint32_t disp = be32(&dram[0x200C]);
             if (disp != display_base) { display_base = disp; grab_frame(); }
             if (cpu_a->unknown_count) {
