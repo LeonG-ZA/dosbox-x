@@ -219,6 +219,8 @@ void FCARD_Shutdown(void) {
 
 void FCARD_GetStick(int &x, int &y) { x = joy_x; y = joy_y; }
 void FCARD_SetButton(unsigned bit, bool pressed) { map_button(bit, pressed); }
+/* Visette microphone level of one card (player), 0..255: shared-memory byte 0x17, read by CTRL_GetMic */
+void FCARD_SetMicLevel(unsigned card, uint8_t level) { if (card < ncards) cards[card].ram[0x17] = level; }
 
 void FCARD_AddMapperKeys(void) {
     MAPPER_AddHandler(key_coin, MK_9, MMOD1, "su2k_coin", "SU2000 coin");

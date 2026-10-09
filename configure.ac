@@ -1318,6 +1318,30 @@ case "$host" in
     ;;
 esac
 
+dnl FEATURE: SU2000 VR link: https (mbedTLS) and WebRTC (libdatachannel) for the headset page
+AH_TEMPLATE(C_SU2000_VRLINK, [Define to 1 to give the SU2000 VR link https and WebRTC, requires mbedTLS 3 and libdatachannel])
+AC_ARG_ENABLE(su2000-vrlink,AC_HELP_STRING([--disable-su2000-vrlink],[Disable https / WebRTC for the SU2000 VR link]),enable_su2000_vrlink=$enableval,enable_su2000_vrlink=yes)
+if test x$enable_su2000_vrlink = xyes ; then
+  AC_LANG_PUSH([C++])
+  AC_CHECK_HEADER(rtc/rtc.h,have_rtc_h=yes,)
+  dnl mbedTLS 3 only (build_info.h is new in 3.0; several 2.x calls differ)
+  AC_MSG_CHECKING([for mbedTLS 3])
+  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <mbedtls/build_info.h>
+#include <mbedtls/ssl.h>]],[[#if MBEDTLS_VERSION_MAJOR < 3
+#error mbedTLS 3 required
+#endif]])],[have_mbedtls_h=yes],[have_mbedtls_h=no])
+  AC_MSG_RESULT([$have_mbedtls_h])
+  AC_LANG_POP([C++])
+  AC_CHECK_LIB(datachannel, rtcCreatePeerConnection, have_datachannel_lib=yes, ,)
+  AC_CHECK_LIB(mbedtls, mbedtls_ssl_init, have_mbedtls_lib=yes, ,-lmbedx509 -lmbedcrypto)
+  if test x$have_rtc_h = xyes -a x$have_mbedtls_h = xyes -a x$have_datachannel_lib = xyes -a x$have_mbedtls_lib = xyes ; then
+    AC_DEFINE(C_SU2000_VRLINK,1)
+    LIBS="$LIBS -ldatachannel -lmbedtls -lmbedx509 -lmbedcrypto"
+  else
+    AC_MSG_WARN([Can't find libdatachannel and mbedTLS 3: the SU2000 VR link has no https / WebRTC])
+  fi
+fi
+
 dnl FEATURE: Whether to use libslirp, and enable userspace TCP/IP emulation
 AH_TEMPLATE(C_SLIRP, [Define to 1 to enable userspace TCP/IP emulation, requires libslirp])
 AC_ARG_ENABLE(libslirp,AC_HELP_STRING([--disable-libslirp],[Disable libslirp support]),enable_libslirp=$enableval,enable_libslirp=yes)

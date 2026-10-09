@@ -35,7 +35,15 @@
 
 #if defined(WITH_ENET_IMPLEMENTATION)
  #define ENET_IMPLEMENTATION
+ #if defined(_MSC_VER)
+  /* enet.h defines its own inet_pton for MSVC; keep it private so it does not clash with ws2_32's, which the SU2000
+     VR link libraries (libjuice) import */
+  #define inet_pton enet_inet_pton
+ #endif
  #include "enet.h"
+ #if defined(_MSC_VER)
+  #undef inet_pton
+ #endif
 #endif
 #include "ipx.h"
 #include "logging.h"

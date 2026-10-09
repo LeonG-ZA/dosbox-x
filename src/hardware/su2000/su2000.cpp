@@ -196,6 +196,8 @@ static bool su2k_pix_window = false;
 static std::string su2k_frame_dir;
 static uint32_t su2k_seen_seq[8];
 static unsigned su2k_dumped = 0;
+static unsigned su2k_xr_pending = 0, su2k_xr_all = 0;
+static double su2k_xr_last = 0;
 #if C_SDL2
 static SDL_Window *su2k_sdlwin = NULL;
 static SDL_Renderer *su2k_ren = NULL;
@@ -230,7 +232,8 @@ static void su2k_display_tick(Bitu val) {
         uint32_t seq = 0;
         PixFrame cf;
         if (!PIX1000_GetFrame(i, cf, seq)) continue;
-        if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; }
+        if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; su2k_xr_pending |= 1u << i; }
+        su2k_xr_all |= 1u << i;
         if (cf.band_lo == 0 || n == 0 || f[n - 1].width != cf.width || (PIX1000_Stereo() && i == ncards)) {
             f[n] = cf;
             have[n] = true;
@@ -247,7 +250,13 @@ static void su2k_display_tick(Bitu val) {
         if (f[i].height > h) h = f[i].height;
     }
     if (any_new && w && h) {
-        XR_PushFrame(f, n, PIX1000_Stereo());
+        /* headset: one picture per complete set (the boards, and with stereo both eyes, finish at different times) */
+        const double now = PIC_FullIndex();
+        if ((su2k_xr_pending & su2k_xr_all) == su2k_xr_all || now - su2k_xr_last > 60.0) {
+            XR_PushFrame(f, n, PIX1000_Stereo());
+            su2k_xr_pending = 0;
+            su2k_xr_last = now;
+        }
         if (!su2k_frame_dir.empty()) {
             char name[1024];
             snprintf(name, sizeof(name), "%s/pix%06u.ppm", su2k_frame_dir.c_str(), su2k_dumped++);
@@ -367,6 +376,7 @@ static void SU2000_OnReset(Section *sec) {
         TRACKER_SetHandTarget(s->Get_string("tracker hand target"));
         TRACKER_SetMouse(s->Get_bool("tracker mouse"));
     }
+    XR_Configure(s->Get_int("vr jpeg quality"), s->Get_bool("vr audio"), s->Get_bool("vr webrtc"), s->Get_string("vr certificate"));
     XR_Setup(s->Get_int("vr port"));
     {
         /* format/control cards: "ctrl ports" and "ctrl mem" pair up in order */
@@ -447,6 +457,14 @@ void SU2000_AddConfigSection(Config *conf) {
     Pint = secprop->Add_int("vr port", Property::Changeable::WhenIdle, 0);
     Pint->Set_help("If not 0, serve the WebXR headset page on this TCP port (http://localhost:<port>/): video goes to the\n"
                    "headset, head / controller poses and buttons come back as the tracker and format card. 0 = off.");
+    Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 85);
+    Pint->Set_help("JPEG quality (10..100) of the images sent to the headset.");
+    Pbool = secprop->Add_bool("vr audio", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Send the emulator's sound to the headset (it still plays on this PC too).");
+    Pbool = secprop->Add_bool("vr webrtc", Property::Changeable::WhenIdle, true);
+    Pbool->Set_help("Use a WebRTC data channel (UDP) for video, audio, microphone and poses; false = WebSocket (TCP) only.");
+    Pstring = secprop->Add_string("vr certificate", Property::Changeable::WhenIdle, "su2000vr");
+    Pstring->Set_help("Base name of the https certificate files (<name>.crt, <name>.key); created (self-signed) if missing.");
     Pbool = secprop->Add_bool("pix window", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Show the PIX video channels in a separate window (SDL2 builds).");
     Pstring = secprop->Add_string("pix frame dump", Property::Changeable::WhenIdle, "");

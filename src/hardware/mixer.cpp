@@ -673,6 +673,8 @@ unsigned long long mixer_sample_counter = 0;
 double mixer_start_pic_time = 0;
 
 /* once a millisecond, render 1ms of audio, up to whole samples */
+void (*MIXER_TapCallback)(unsigned rate, unsigned frames, const int16_t *lr) = NULL;
+
 static void MIXER_MixData(Bitu fracs/*render up to*/) {
     unsigned int prev_rendered = mixer.samples_rendered_ms.w;
     MixerChannel *chan = mixer.channels;
@@ -731,6 +733,20 @@ static void MIXER_MixData(Bitu fracs/*render up to*/) {
         }
         assert(readpos <= MIXER_BUFSIZE);
         CAPTURE_AddWave( mixer.freq, added, (int16_t*)convert );
+    }
+
+    if (MIXER_TapCallback) {
+        /* SU2000 VR link: the final mix, also sent to the headset */
+        int16_t convert[1024][2];
+        Bitu added = whole - prev_rendered;
+        if (added>1024) added=1024;
+        Bitu readpos = mixer.work_in + prev_rendered;
+        for (Bitu i=0;i<added;i++) {
+            convert[i][0]=MIXER_CLIP(mixer.work[readpos][0] >> MIXER_VOLSHIFT);
+            convert[i][1]=MIXER_CLIP(mixer.work[readpos][1] >> MIXER_VOLSHIFT);
+            readpos++;
+        }
+        MIXER_TapCallback((unsigned)mixer.freq, (unsigned)added, (int16_t*)convert);
     }
 
     mixer.samples_rendered_ms.w = whole;

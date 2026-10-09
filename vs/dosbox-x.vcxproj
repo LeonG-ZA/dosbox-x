@@ -1537,7 +1537,9 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\hardware\su2000\m88110.cpp" />
     <ClCompile Include="..\src\hardware\su2000\fcard.cpp" />
     <ClCompile Include="..\src\hardware\su2000\sscape.cpp" />
-    <ClCompile Include="..\src\hardware\su2000\xrserver.cpp" />
+    <ClCompile Include="..\src\hardware\su2000\xrserver.cpp">
+      <AdditionalIncludeDirectories Condition="'$(Platform)'=='x64'">$(ProjectDir)..\obj\webrtc\install\include;$(ProjectDir)libdatachannel\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="..\src\hardware\iohandler.cpp" />
     <ClCompile Include="..\src\hardware\ipx.cpp" />
     <ClCompile Include="..\src\hardware\ipxserver.cpp" />
@@ -2058,4 +2060,8 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <!-- SU2000 VR link: build mbedTLS and libdatachannel (x64) once, see build-webrtc.cmd -->
+  <Target Name="SU2000VrLinkLibs" BeforeTargets="ClCompile" Condition="'$(Platform)'=='x64'">
+    <Exec Command="call &quot;$(ProjectDir)build-webrtc.cmd&quot;" />
+  </Target>
 </Project>
