@@ -12,12 +12,17 @@ vr port = 8090        # 0 = off
 stereo = true         # optional: a real right-eye image (doubles the PIX work)
 ```
 
-Open `http://localhost:8090/` in a WebXR browser and press **Enter VR**. WebXR only runs on `localhost` or https:
+WebXR only runs on `localhost` or https. The server answers both on the same port: plain http, and https with a
+self-signed certificate (Windows builds; created on first start as "CN=SU2000 VR" in the current user's certificate
+store and reused afterwards). The log lists the https addresses at start-up.
 
-* **PC headset (Rift S, Link, SteamVR):** desktop Chrome or Edge on the same PC, `http://localhost:8090/`.
-* **Quest (standalone):** connect by USB, run `adb reverse tcp:8090 tcp:8090`, then open `http://localhost:8090/` in
-  the Quest browser. (Plain `http://<pc-ip>:8090/` only shows the flat preview: the browser refuses WebXR there.)
-
+* **Quest browser over the network (Wi-Fi / Virtual Desktop):** open `https://<pc-ip>:8090/` (for example
+  `https://192.168.88.24:8090/`), choose *Advanced* -> *Proceed* at the certificate warning once, then **Enter VR**.
+  Allow DosBox-X through the Windows firewall on private networks if Windows asks.
+* **PC headset (Rift S, Link, Virtual Desktop with SteamVR):** desktop Chrome or Edge on the same PC,
+  `http://localhost:8090/`. The browser uses the active OpenXR runtime: start it first (for example SteamVR), or set
+  Virtual Desktop's VDXR as the active runtime.
+* **Quest by USB:** `adb reverse tcp:8090 tcp:8090`, then `http://localhost:8090/` in the Quest browser.
 The page also works without a headset as a flat preview of both eyes.
 
 URL parameters: `player=1|2` (video channel; only player 1 drives the tracker so far), `fov=<degrees>` (horizontal
@@ -58,4 +63,4 @@ Credits are still added on the PC (`c`).
 * Position placement only works in DAC (it uses DAC's data addresses); other games get orientation only.
 * Only player 1 drives the tracker; DN2's second player and the second tracker card are not wired yet.
 * Uncompressed RGB565: about 9 MB/s mono / 18 MB/s stereo at 24 frames/s. Fine over USB or on the same PC; Wi-Fi may
-  need compression later.
+  need compression later (https adds little: about 24 frames/s were measured over TLS on the LAN address).
