@@ -258,21 +258,26 @@ struct Packet {
 std::mutex aud_mtx;
 std::deque<Packet> audio_q, mic_q;
 uint64_t audio_seq = 0, mic_seq = 0;
-std::vector<int16_t> audio_acc;
-unsigned audio_rate = 0;
 
 std::atomic<int> nclients(0);
 
-void audio_tap(unsigned rate, unsigned frames, const int16_t *lr) {
+/* src 0: the whole DOSBox-X mix, for every player; src 1 / 2: one Soundscape card, for that player only (two-player
+   cabinet: each player has a card). */
+std::vector<int16_t> audio_accs[3];
+unsigned audio_rates[3];
+
+void audio_push(unsigned src, unsigned rate, unsigned frames, const int16_t *lr) {
     if (!audio_on || nclients <= 0) return;
     std::lock_guard<std::mutex> lk(aud_mtx);
+    std::vector<int16_t> &audio_acc = audio_accs[src];
+    unsigned &audio_rate = audio_rates[src];
     if (rate != audio_rate) { audio_rate = rate; audio_acc.clear(); }
     audio_acc.insert(audio_acc.end(), lr, lr + frames * 2);
     const size_t per = (size_t)rate / 100 * 2;     /* 10 ms */
     while (per && audio_acc.size() >= per) {
         Packet p;
         p.seq = ++audio_seq;
-        p.from = 0;
+        p.from = (int)src;
         p.data = "SUA1";
         put32(p.data, (uint32_t)p.seq);
         put16(p.data, (uint16_t)rate);
@@ -280,8 +285,12 @@ void audio_tap(unsigned rate, unsigned frames, const int16_t *lr) {
         p.data.append((const char *)audio_acc.data(), per * 2);
         audio_acc.erase(audio_acc.begin(), audio_acc.begin() + (ptrdiff_t)per);
         audio_q.push_back(std::move(p));
-        while (audio_q.size() > 50) audio_q.pop_front();
+        while (audio_q.size() > 100) audio_q.pop_front();
     }
+}
+
+void audio_tap(unsigned rate, unsigned frames, const int16_t *lr) {
+    if (SSCAPE_Cards() < 2) audio_push(0, rate, frames, lr);
 }
 
 std::atomic<int> mic_level[2];
@@ -751,7 +760,7 @@ void serve_ws(Conn &c, std::string buf) {
         std::vector<std::string> pk;
         {
             std::lock_guard<std::mutex> lk(aud_mtx);
-            for (const auto &p : audio_q) if (p.seq > audio_sent) pk.push_back(p.data);
+            for (const auto &p : audio_q) if (p.seq > audio_sent && (p.from == 0 || p.from == cl.player)) pk.push_back(p.data);
             audio_sent = audio_seq;
             /* the other player's voice, with the left / right levels this player's format card gives MICNET (DAC
                places the opponent's voice by direction); centred at full level while the game has not set them */
@@ -999,6 +1008,10 @@ void XR_Shutdown(void) {
 }
 
 bool XR_Active(void) { return running && p1_clients > 0; }
+
+void XR_CardAudio(unsigned card, unsigned rate, unsigned frames, const int16_t *lr) {
+    if (running && card < 2) audio_push(card + 1, rate, frames, lr);
+}
 
 void XR_PushFrame(const PixFrame *ch, unsigned n, bool stereo) {
     if (!running || nclients <= 0) return;
