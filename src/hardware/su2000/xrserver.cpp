@@ -100,6 +100,7 @@ typedef int sock_t;
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
+#include <mbedtls/oid.h>
 #include <psa/crypto.h>
 #endif
 
@@ -358,6 +359,8 @@ mbedtls_ssl_config tls_conf;
 mbedtls_x509_crt tls_cert;
 mbedtls_pk_context tls_key;
 
+std::vector<std::string> lan_addresses(void);
+
 int locked_random(void *p, unsigned char *out, size_t n) {
     std::lock_guard<std::mutex> lk(drbg_mtx);
     return mbedtls_ctr_drbg_random(p, out, n);
@@ -394,7 +397,7 @@ bool tls_make_certificate(const std::string &crt_path, const std::string &key_pa
     if (ok) {
         unsigned char serial[8];
         locked_random(&tls_drbg, serial, sizeof(serial));
-        serial[0] &= 0x7F;
+        serial[0] = (unsigned char)((serial[0] & 0x7F) | 0x40);     /* positive, minimal DER integer */
         time_t t = time(NULL);
         struct tm g;
 #ifdef _WIN32
@@ -413,6 +416,39 @@ bool tls_make_certificate(const std::string &crt_path, const std::string &key_pa
              mbedtls_x509write_crt_set_issuer_name(&crt, "CN=SU2000 VR") == 0 &&
              mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial)) == 0 &&
              mbedtls_x509write_crt_set_validity(&crt, from, to) == 0;
+        /* Chromium refuses a certificate without the usual server extensions as invalid (no "proceed" button):
+           subject alternative names (localhost and this machine's IPv4 addresses), CA:false, key usage, serverAuth */
+        static unsigned char ips[16][4];
+        static mbedtls_x509_san_list san[17];
+        unsigned nsan = 0;
+        memset(san, 0, sizeof(san));
+        san[nsan].node.type = MBEDTLS_X509_SAN_DNS_NAME;
+        san[nsan].node.san.unstructured_name.p = (unsigned char *)"localhost";
+        san[nsan].node.san.unstructured_name.len = 9;
+        nsan++;
+        for (const auto &ip : lan_addresses()) {
+            unsigned a, b, c, d;
+            if (nsan > 16 || sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) continue;
+            unsigned char *q = ips[nsan - 1];
+            q[0] = (unsigned char)a; q[1] = (unsigned char)b; q[2] = (unsigned char)c; q[3] = (unsigned char)d;
+            san[nsan].node.type = MBEDTLS_X509_SAN_IP_ADDRESS;
+            san[nsan].node.san.unstructured_name.p = q;
+            san[nsan].node.san.unstructured_name.len = 4;
+            nsan++;
+        }
+        for (unsigned i = 0; i + 1 < nsan; i++) san[i].next = &san[i + 1];
+        static const char server_auth[] = MBEDTLS_OID_SERVER_AUTH;
+        mbedtls_asn1_sequence eku;
+        memset(&eku, 0, sizeof(eku));
+        eku.buf.tag = MBEDTLS_ASN1_OID;
+        eku.buf.p = (unsigned char *)server_auth;
+        eku.buf.len = sizeof(server_auth) - 1;
+        ok = ok && mbedtls_x509write_crt_set_subject_alternative_name(&crt, san) == 0 &&
+             mbedtls_x509write_crt_set_basic_constraints(&crt, 0, -1) == 0 &&
+             mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_KEY_AGREEMENT) == 0 &&
+             mbedtls_x509write_crt_set_ext_key_usage(&crt, &eku) == 0 &&
+             mbedtls_x509write_crt_set_subject_key_identifier(&crt) == 0 &&
+             mbedtls_x509write_crt_set_authority_key_identifier(&crt) == 0;
     }
     static unsigned char crt_pem[4096], key_pem[2048];
     ok = ok && mbedtls_x509write_crt_pem(&crt, crt_pem, sizeof(crt_pem), locked_random, &tls_drbg) == 0 &&
@@ -439,8 +475,12 @@ bool tls_init(void) {
     for (int attempt = 0; attempt < 2; attempt++) {
         if (read_file(crt_path, crt) && read_file(key_path, key) &&
             mbedtls_x509_crt_parse(&tls_cert, (const unsigned char *)crt.c_str(), crt.size() + 1) == 0 &&
-            mbedtls_pk_parse_key(&tls_key, (const unsigned char *)key.c_str(), key.size() + 1, NULL, 0, locked_random, &tls_drbg) == 0)
+            mbedtls_pk_parse_key(&tls_key, (const unsigned char *)key.c_str(), key.size() + 1, NULL, 0, locked_random, &tls_drbg) == 0 &&
+            mbedtls_x509_crt_has_ext_type(&tls_cert, MBEDTLS_X509_EXT_SUBJECT_ALT_NAME))
             break;
+        /* missing, unreadable, or made by an older build without extensions: make a new one */
+        mbedtls_x509_crt_free(&tls_cert); mbedtls_x509_crt_init(&tls_cert);
+        mbedtls_pk_free(&tls_key); mbedtls_pk_init(&tls_key);
         if (attempt || !tls_make_certificate(crt_path, key_path)) {
             LOG_MSG("SU2000: VR server: no TLS certificate (%s), https disabled", crt_path.c_str());
             return false;
