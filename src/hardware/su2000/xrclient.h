@@ -97,16 +97,17 @@ function binary(b){
     }).catch(()=>{});
     if(asm.size>8) for(const k of asm.keys()) if(k<id-8) asm.delete(k);
   } else if(m==='SUA1'){ if(audio) audio.play(0,dv.getUint16(8,true),new Int16Array(b.slice(12))); }
-  else if(m==='SUM1'){ if(audio) audio.play(1,dv.getUint16(8,true),new Int16Array(b.slice(12))); }
+  else if(m==='SUV1'&&b.byteLength>=20){ if(audio) audio.play(1,dv.getUint16(8,true),new Int16Array(b.slice(20)),dv.getFloat32(12,true),dv.getFloat32(16,true)); }
 }
 )XR";
     s += R"XR(
-/* ---- sound: game audio (stereo) and the other player's microphone (mono), each in an AudioWorklet ring buffer ---- */
+/* ---- sound: game audio (stereo) and the other player's microphone (mono, panned with the left / right levels the game
+   gives the format card's MICNET input), each in an AudioWorklet ring buffer ---- */
 const WORKLET=`
 class Player extends AudioWorkletProcessor{
   constructor(o){super();this.ch=o.processorOptions.ch;this.len=this.ch*48000;this.buf=new Float32Array(this.len);
-    this.r=0;this.n=0;this.frac=0;this.ratio=1;this.run=false;this.rate=48000;
-    this.port.onmessage=e=>{const s=e.data.s;this.rate=e.data.rate;this.ratio=this.rate/sampleRate;
+    this.r=0;this.n=0;this.frac=0;this.ratio=1;this.run=false;this.rate=48000;this.gl=this.gr=this.tl=this.tr=1;
+    this.port.onmessage=e=>{const s=e.data.s;this.rate=e.data.rate;if(e.data.gl!==undefined){this.tl=e.data.gl;this.tr=e.data.gr;}this.ratio=this.rate/sampleRate;
       let w=(this.r+this.n)%this.len;
       for(let i=0;i<s.length&&this.n<this.len;i++){this.buf[w]=s[i]/32768;w=(w+1)%this.len;this.n++;}
       if(!this.run&&this.n/this.ch>this.rate*0.06)this.run=true;
@@ -116,7 +117,8 @@ class Player extends AudioWorkletProcessor{
       if(!this.run||this.n<2*c){L[k]=0;R[k]=0;this.run=false;continue;}
       const a=this.r,b=(this.r+c)%this.len,f=this.frac;
       L[k]=this.buf[a]+(this.buf[b]-this.buf[a])*f;
-      R[k]=c>1?this.buf[a+1]+(this.buf[(b+1)%this.len]-this.buf[a+1])*f:L[k];
+      if(c>1)R[k]=this.buf[a+1]+(this.buf[(b+1)%this.len]-this.buf[a+1])*f;
+      else{this.gl+=(this.tl-this.gl)*0.002;this.gr+=(this.tr-this.gr)*0.002;R[k]=L[k]*this.gr;L[k]*=this.gl;}
       this.frac+=this.ratio;while(this.frac>=1){this.frac-=1;this.r=(this.r+c)%this.len;this.n-=c;}}
     return true;}}
 registerProcessor('su-player',Player);
@@ -129,7 +131,7 @@ async function startAudio(){
   const ctx=new AudioContext({latencyHint:'interactive'});
   await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET],{type:'application/javascript'})));
   const node=[2,1].map(ch=>{const n=new AudioWorkletNode(ctx,'su-player',{numberOfInputs:0,outputChannelCount:[2],processorOptions:{ch}});n.connect(ctx.destination);return n;});
-  audio={ctx,play(k,rate,s){ if(k==0&&!$('snd').checked) return; node[k].port.postMessage({rate,s},[s.buffer]); }};
+  audio={ctx,play(k,rate,s,gl,gr){ if(k==0&&!$('snd').checked) return; node[k].port.postMessage({rate,s,gl,gr},[s.buffer]); }};
   if(ctx.state!=='running') ctx.resume();
   if($('mic').checked) startMic();
 }

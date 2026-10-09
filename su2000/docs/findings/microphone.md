@@ -15,8 +15,16 @@ small mixer:
   SFL's `H`/`J` change "MICNET volume".
 * **Mic level**: `CTRL_GetMic` -> `CTRLI_FCD_GetMic` sends card command 2 and reads shared-memory byte **+0x17**
   (DAC 0x9e160).
-* **Fade** (left/right balance / volume of the mixer inputs): `CTRL_SetFade` / `CTRLI_FCD_SetFade`, applied by
-  `CTRLI_FCD_UpdateMixer` through card commands.
+* **Fade** (left/right level of the mixer inputs): `CTRL_SetFade(cards, signals, sides, level 0..1)` stores a level per card,
+  signal and side (1 = left, 2 = right); `CTRLI_FCD_UpdateMixer` (DAC 0x9ee80) writes it to **I/O base+5** as register /
+  value byte pairs: `reg` = both sides, `reg | 0x20` = left, `reg | 0x40` = right. Registers have bit 7 set; levels are
+  mostly 5-bit (0..31). The signal -> register table (DAC.EXE file offset 0xf1210):
+
+  | signal | 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | **0x20** | 0x40 | 0x80 | 0x100 | 0x200 |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | register | 0x90 | 0x92 | 0x93 | 0x91 | 0x95 | **0x94** | 0x97 | 0x96 | 0x82 | 0x81 |
+
+  DAC pans signal **0x20** (register 0x94 = MICNET) with level (1 -/+ sin(bearing)) * k, scaled down with distance.
 * `[CTRL] MIC_OFFSET` (KEYWORD.VPC) is a configuration keyword; no VPC file on the drives sets it.
 
 ## Use by the games
@@ -36,5 +44,10 @@ So the microphone was an intercom between the players of linked pods (and of the
 
 * The headset page sends its microphone (16 kHz mono) to DOSBox-X; the peak level goes to the player's format card
   byte +0x17 (`FCARD_SetMicLevel`), and the audio is relayed to the clients of the other player (intercom).
-* Not yet: the format card's fade / MICNET volume (decode `CTRLI_FCD_UpdateMixer` commands, then pan the relayed voice
-  as DAC asks), side-tone, and voice between two emulators (needs the network card).
+* The relayed voice is played with the left / right MICNET levels of the **listener's** format card (register 0x94, fcard.cpp
+  `FCARD_GetMicnet`), so it comes from the direction the game gives it. Until a game writes a non-zero MICNET level the
+  voice plays centred at full level. Verified by writing the register directly (left 31, right 8 -> gains 1.0 / 0.26).
+* No game drives it yet in the emulator: in DAC the opponent with a voice is a human at a second, networked pod
+  (`micnet[]` is never activated in a one-pod game; the network card is not emulated), and DN2 (two players on one PC)
+  stops at start-up because it loads its sounds onto a second Soundscape card, which is not emulated.
+* Not yet: side-tone, MICNET master volume.
