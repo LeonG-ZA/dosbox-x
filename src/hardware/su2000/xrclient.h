@@ -46,7 +46,7 @@ $('pl').onchange=()=>{player=+$('pl').value; if(ws&&ws.readyState==1) ws.send('S
 $('fov').onchange=()=>{fov=+$('fov').value;};
 let ws=null, frame=null, fresh=false, nframes=0, cropW=8, cropFor=0;  /* the game may draw into only part of the line: crop to the widest drawn column seen */
 function connect(){
-  ws=new WebSocket('ws://'+location.host+'/ws'); ws.binaryType='arraybuffer';
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'); ws.binaryType='arraybuffer';
   ws.onopen=()=>{ws.send('S '+player); $('st').textContent='connected';};
   ws.onclose=()=>{$('st').textContent='disconnected, retrying'; setTimeout(connect,1000);};
   ws.onmessage=e=>{
@@ -91,7 +91,7 @@ function angles(q){const x=q[0],y=q[1],z=q[2],w=q[3];
 
 /* WebXR */
 let session=null, gl=null, ref=null, prog=null, texs=[], loc={}, imgW=0, imgH=0, lastBtn=0, poseFrame=null;
-function checkXR(){ navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok; $('vr').textContent=ok?'Enter VR':'VR not available (start the headset runtime, e.g. SteamVR)';}); }
+function checkXR(){ navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok; $('vr').textContent=ok?'Enter VR':(window.isSecureContext?'VR not available (start the headset runtime, e.g. SteamVR)':'VR needs https:// or localhost');}); }
 if(navigator.xr){ checkXR(); navigator.xr.addEventListener('devicechange',checkXR); setInterval(()=>{ if(!session) checkXR(); },3000); }
 else $('vr').textContent='WebXR not available (needs https or localhost)';
 $('vr').onclick=async()=>{
