@@ -85,12 +85,12 @@ function binary(b){
     const id=dv.getUint32(4,true), eye=dv.getUint8(8), eyes=dv.getUint8(9), ch=dv.getUint16(10,true), chs=dv.getUint16(12,true);
     if(id<=lastId) return;
     let a=asm.get(id);
-    if(!a){a={eyes,parts:[[],[]],got:[0,0],need:[0,0],w:dv.getUint16(14,true),h:dv.getUint16(16,true),stereo:dv.getUint16(18,true)&1,pose:new Float32Array(b.slice(20,48))}; asm.set(id,a);}
+    if(!a){a={eyes,parts:[[],[]],got:[0,0],need:[0,0],w:dv.getUint16(14,true),h:dv.getUint16(16,true),stereo:dv.getUint16(18,true)&1,png:dv.getUint16(18,true)&2,pose:new Float32Array(b.slice(20,48))}; asm.set(id,a);}
     if(a.parts[eye][ch]) return;
     a.parts[eye][ch]=new Uint8Array(b,48); a.got[eye]++; a.need[eye]=chs;
     for(let e=0;e<eyes;e++) if(!a.need[e]||a.got[e]<a.need[e]) return;
     for(const k of asm.keys()) if(k<=id) asm.delete(k);
-    Promise.all(a.parts.slice(0,eyes).map(p=>createImageBitmap(new Blob(p,{type:'image/jpeg'})))).then(bm=>{
+    Promise.all(a.parts.slice(0,eyes).map(p=>createImageBitmap(new Blob(p,{type:a.png?'image/png':'image/jpeg'})))).then(bm=>{
       if(id<=lastId){bm.forEach(x=>x.close());return;}
       lastId=id; if(cur) cur.bm.forEach(x=>x.close());
       cur={bm,w:a.w,h:a.h,eyes,stereo:a.stereo,pose:a.pose}; fresh=true; nframes++;
