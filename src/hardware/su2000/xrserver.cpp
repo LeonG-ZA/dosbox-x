@@ -9,7 +9,7 @@
  *  Messages (little-endian; the same binary messages travel on the data channel or, as fallback, the WebSocket):
  *    server -> client
  *      "SUJ1" u32 frame, u8 eye, u8 eyes, u16 chunk, u16 chunks, u16 width, u16 height, u16 flags (bit0 = emulator
- *             stereo), f32 head pose [px py pz qx qy qz qw] the frame was taken with, then a piece of the eye's JPEG
+ *             stereo, bit1 = PNG instead of JPEG), f32 head pose [px py pz qx qy qz qw] the frame was taken with, then a piece of the eye's image
  *      "SUA1" u32 seq, u16 rate, u16 frames, then frames * 2 int16 (left, right): game audio, about 10 ms per packet
  *      "SUM1" u32 seq, u16 rate, u16 frames, then int16 mono: the other player's microphone (Visette intercom)
  *    client -> server
@@ -171,7 +171,8 @@ double now_ms(void) {
 }
 
 /* ---- settings ---- */
-int jpeg_quality = 85;
+int jpeg_quality = 95;
+bool use_png = true;            /* lossless; smaller than JPEG on the flat-shaded PIX pictures */
 bool audio_on = true;
 bool rtc_on = true;
 std::string cert_base = "su2000vr";
@@ -238,7 +239,8 @@ std::shared_ptr<const Encoded> encoded(int player) {
                 p[0] = (uint8_t)(c >> 16); p[1] = (uint8_t)(c >> 8); p[2] = (uint8_t)c;
             }
         std::string out;
-        stbi_write_jpg_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), jpeg_quality);
+        if (use_png) stbi_write_png_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), (int)crop * 3);
+        else stbi_write_jpg_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), jpeg_quality);   /* > 90: no chroma subsampling */
         e->jpg.push_back(out);
     }
     std::lock_guard<std::mutex> lk2(enc_mtx);
@@ -659,7 +661,7 @@ bool send_frame(Client &cl, Conn &c, const Encoded &e) {
             put32(m, e.seq);
             m.push_back((char)k); m.push_back((char)eyes);
             put16(m, (uint16_t)ch); put16(m, (uint16_t)chunks);
-            put16(m, (uint16_t)e.w); put16(m, (uint16_t)e.h); put16(m, e.stereo ? 1 : 0);
+            put16(m, (uint16_t)e.w); put16(m, (uint16_t)e.h); put16(m, (uint16_t)((e.stereo ? 1 : 0) | (use_png ? 2 : 0)));
             m.append((const char *)e.pose, sizeof(e.pose));
             const size_t off = ch * max_piece;
             m.append(j, off, j.size() - off < max_piece ? j.size() - off : max_piece);
@@ -921,7 +923,8 @@ std::vector<std::string> lan_addresses(void) {
 
 } // namespace
 
-void XR_Configure(int quality, bool audio, bool webrtc, const char *certificate) {
+void XR_Configure(const char *format, int quality, bool audio, bool webrtc, const char *certificate) {
+    use_png = !(format && (strcmp(format, "jpeg") == 0 || strcmp(format, "jpg") == 0));
     jpeg_quality = quality < 10 ? 10 : quality > 100 ? 100 : quality;
     audio_on = audio;
     rtc_on = webrtc;

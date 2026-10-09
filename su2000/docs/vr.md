@@ -10,7 +10,8 @@ hand). No headset runtime or plug-in is linked into DOSBox-X.
 [su2000]
 vr port = 8090        # 0 = off
 stereo = true         # optional: a real right-eye image (doubles the PIX work)
-vr jpeg quality = 85  # image quality sent to the headset
+vr image format = png # png (lossless, default) or jpeg
+vr jpeg quality = 95  # with jpeg; above 90 the colour is not subsampled
 vr audio = true       # game sound to the headset (it also keeps playing on the PC)
 vr webrtc = true      # UDP data channel; false = WebSocket (TCP) only
 vr certificate = su2000vr   # https certificate files su2000vr.crt / .key (created if missing)
@@ -58,10 +59,11 @@ Credits are still added on the PC (`c`).
 * **WebRTC data channel** (UDP, DTLS + SCTP, unordered, no retransmissions): video, game audio, microphone and poses.
   A lost packet is skipped instead of delaying the ones behind it. The browser offers, DOSBox-X answers
   (libdatachannel); only host candidates are used, which is enough on a LAN.
-* **Video** is sent as images, not a video stream: each eye as a JPEG (stb_image_write), cropped to the drawn width
+* **Video** is sent as images, not a video stream: each eye as a lossless PNG (or JPEG; stb_image_write), cropped to the drawn width
   (the game draws into about 352 of the 768 pixels of a line in DAC), split into pieces of at most 60 KB, with the head
   pose the frame was taken with. One picture is sent once every board (and with stereo both eyes) has a new frame.
-  Measured in DAC: about 14 KB per eye, 50 stereo frames/s, about 1.3 MB/s.
+  Measured in DAC: PNG about 6 KB per eye, 50 stereo frames/s, 0.55 to 1.2 MB/s. The flat-shaded pictures compress
+  better losslessly than as JPEG (JPEG at quality 85 was about 14 KB and showed artefacts on the polygon edges).
 * **Game audio**: the DOSBox-X mixer output (48 kHz stereo, 16-bit PCM) in 10 ms packets; the page plays it through an
   AudioWorklet with a 60 ms jitter buffer (trimmed back to 80 ms when it grows past 250 ms) and resamples to the
   headset's rate.

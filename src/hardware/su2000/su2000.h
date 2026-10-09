@@ -57,7 +57,7 @@ void FCARD_SetButton(unsigned bit, bool pressed);
 void FCARD_SetMicLevel(unsigned card, uint8_t level);
 void TRACKER_SetMouse(bool on);
 void TRACKER_XRPose(const double *head, const double *hand, bool recenter);
-void XR_Configure(int jpeg_quality, bool audio, bool webrtc, const char *certificate);
+void XR_Configure(const char *format, int jpeg_quality, bool audio, bool webrtc, const char *certificate);
 void XR_Setup(int port);
 void XR_Shutdown(void);
 bool XR_Active(void);

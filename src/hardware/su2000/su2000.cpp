@@ -376,7 +376,7 @@ static void SU2000_OnReset(Section *sec) {
         TRACKER_SetHandTarget(s->Get_string("tracker hand target"));
         TRACKER_SetMouse(s->Get_bool("tracker mouse"));
     }
-    XR_Configure(s->Get_int("vr jpeg quality"), s->Get_bool("vr audio"), s->Get_bool("vr webrtc"), s->Get_string("vr certificate"));
+    XR_Configure(s->Get_string("vr image format"), s->Get_int("vr jpeg quality"), s->Get_bool("vr audio"), s->Get_bool("vr webrtc"), s->Get_string("vr certificate"));
     XR_Setup(s->Get_int("vr port"));
     {
         /* format/control cards: "ctrl ports" and "ctrl mem" pair up in order */
@@ -457,8 +457,10 @@ void SU2000_AddConfigSection(Config *conf) {
     Pint = secprop->Add_int("vr port", Property::Changeable::WhenIdle, 0);
     Pint->Set_help("If not 0, serve the WebXR headset page on this TCP port (http://localhost:<port>/): video goes to the\n"
                    "headset, head / controller poses and buttons come back as the tracker and format card. 0 = off.");
-    Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 85);
-    Pint->Set_help("JPEG quality (10..100) of the images sent to the headset.");
+    Pstring = secprop->Add_string("vr image format", Property::Changeable::WhenIdle, "png");
+    Pstring->Set_help("Images sent to the headset: png (lossless, default; small for the flat-shaded pictures) or jpeg.");
+    Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 95);
+    Pint->Set_help("JPEG quality (10..100) with vr image format = jpeg; above 90 the colour is not subsampled.");
     Pbool = secprop->Add_bool("vr audio", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Send the emulator's sound to the headset (it still plays on this PC too).");
     Pbool = secprop->Add_bool("vr webrtc", Property::Changeable::WhenIdle, true);
