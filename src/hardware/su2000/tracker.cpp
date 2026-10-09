@@ -94,6 +94,19 @@ bool autoplace = true;
 double target[3] = { 150.0, 450.0, 1750.0 };   /* x right, y forward, z up; head is at (0, 0, 2100) */
 int32_t data_delta = 0x7fffffff;
 
+/* VR headset input (xrserver.cpp). Angles go straight into the raw sensor words; positions become placement targets,
+   expressed in the head's own yaw frame (game axes: x right, y forward, z up, mm) so they turn with the game azimuth. */
+struct XrState {
+    bool on = false;
+    bool init = false;
+    double yaw0 = 0, p0[3] = { 0, 0, 0 };
+    double head_off[3] = { 0, 0, 0 };     /* head displacement from the recentre point */
+    double hand_off[3] = { 0, 0, 0 };     /* hand relative to the head */
+    bool hand = false;
+};
+XrState xr;
+double base_pose[2][6];                    /* sensor 1 / 2 words from [su2000] tracker pose */
+
 /* Closed-loop placement of the hand sensor for DAC: the raw -> game mapping of the hand position goes through the
    library alignment and the game's own scaling, so solve it numerically. Broyden update of a 3x3 Jacobian
    (game units per raw unit), started from a measured column set. Target = DAC's FIXED_TRACKER hand. */
@@ -146,7 +159,7 @@ void debug_game_pose(void) {
     /* DAC.EXE (Solo): head[] at link 0x17d9b0, hand[] at 0x17da10, runtime = link + 0x18c000 [inferred] */
     static double last = -1e9, last_log = -1e9;
     const double now = PIC_FullIndex();
-    if (now - last < 100) return;
+    if (now - last < (xr.on ? 40 : 100)) return;
     const bool do_log = (now - last_log) >= 2000;
     if (do_log) last_log = now;
     last = now;
@@ -179,10 +192,20 @@ void debug_game_pose(void) {
     }
     if (autoplace && delta && v[2] > 100.0f) {
         /* head stays at standing height; the hand target turns with the head (game frame: x right, y forward, z up) */
-        static const double head_target[3] = { 0.0, 0.0, 2100.0 };
         const double gh[3] = { v[0], v[1], v[2] }, gd[3] = { v[6], v[7], v[8] };
         const double az = v[3], c = cos(az), s = sin(az);
-        const double ht[3] = { target[0] * c - target[1] * s, target[0] * s + target[1] * c, target[2] };
+        double head_target[3] = { 0.0, 0.0, 2100.0 };
+        double ht[3] = { target[0] * c - target[1] * s, target[0] * s + target[1] * c, target[2] };
+        if (xr.on) {
+            const double *o = xr.head_off;
+            head_target[0] += o[0] * c - o[1] * s; head_target[1] += o[0] * s + o[1] * c; head_target[2] += o[2];
+            if (xr.hand) {
+                const double *d = xr.hand_off;
+                ht[0] = head_target[0] + d[0] * c - d[1] * s; ht[1] = head_target[1] + d[0] * s + d[1] * c; ht[2] = head_target[2] + d[2];
+            } else {
+                ht[0] += head_target[0]; ht[1] += head_target[1]; ht[2] += o[2];
+            }
+        }
         place(head_pl, gh, pose_f[0], head_target);
         place(hand_pl, gd, pose_f[1], ht);
     }
@@ -280,6 +303,62 @@ void TRACKER_SetPose(const char *s) {
         v[n++] = d; s = e;
     }
     for (unsigned i = 0; i < 24; i++) pose_f[i / 6][i % 6] = v[i];
+    for (unsigned i = 0; i < 12; i++) base_pose[i / 6][i % 6] = v[i];
+    TRACKER_MouseDelta(0, 0, false);
+}
+
+/* WebXR pose (reference space: x right, y up, -z forward, metres; quaternion x y z w) -> yaw (counter-clockwise seen
+   from above) and pitch (up positive) of the forward axis */
+static void xr_angles(const double *p, double &yaw, double &pitch) {
+    const double x = p[3], y = p[4], z = p[5], w = p[6];
+    /* forward = q * (0, 0, -1) */
+    const double fx = -2.0 * (x * z + w * y), fy = -2.0 * (y * z - w * x), fz = -(1.0 - 2.0 * (x * x + y * y));
+    yaw = atan2(-fx, -fz);
+    pitch = asin(fy < -1 ? -1 : fy > 1 ? 1 : fy);
+}
+
+/* world vector (metres) -> head yaw frame in game axes (mm): x right, y forward, z up */
+static void xr_local(const double *d, double yaw, double *out) {
+    const double c = cos(yaw), s = sin(yaw);
+    const double lx = d[0] * c - d[2] * s, lz = d[0] * s + d[2] * c;
+    out[0] = lx * 1000.0; out[1] = -lz * 1000.0; out[2] = d[1] * 1000.0;
+}
+
+void TRACKER_XRPose(const double *head, const double *hand, bool recenter) {
+    if (!head) { xr = XrState(); return; }
+    static const double K = 32767.0 / 3.14159265358979;
+    double yaw, pitch;
+    xr_angles(head, yaw, pitch);
+    if (!xr.init || recenter) {
+        xr.yaw0 = yaw;
+        for (int i = 0; i < 3; i++) xr.p0[i] = head[i];
+        xr.init = true;
+        LOG_MSG("SU2000: VR recentre");
+    }
+    xr.on = true;
+    double dyaw = yaw - xr.yaw0;
+    pose_f[0][3] = base_pose[0][3] + dyaw * K;
+    pose_f[0][4] = base_pose[0][4] + pitch * K;
+    const double d[3] = { head[0] - xr.p0[0], head[1] - xr.p0[1], head[2] - xr.p0[2] };
+    xr_local(d, yaw, xr.head_off);
+    const double r = sqrt(xr.head_off[0] * xr.head_off[0] + xr.head_off[1] * xr.head_off[1] + xr.head_off[2] * xr.head_off[2]);
+    if (r > 1500.0) for (int i = 0; i < 3; i++) xr.head_off[i] *= 1500.0 / r;
+    xr.hand = hand != NULL;
+    if (hand) {
+        double hy, hp;
+        xr_angles(hand, hy, hp);
+        pose_f[1][3] = base_pose[1][3] + (hy - xr.yaw0) * K;
+        pose_f[1][4] = base_pose[1][4] + hp * K;
+        const double dh[3] = { hand[0] - head[0], hand[1] - head[1], hand[2] - head[2] };
+        xr_local(dh, yaw, xr.hand_off);
+    } else {
+        pose_f[1][3] = base_pose[1][3] + dyaw * K;
+        pose_f[1][4] = base_pose[1][4];
+    }
+    for (int s = 0; s < 2; s++) {
+        while (pose_f[s][3] > 32767) pose_f[s][3] -= 65534;
+        while (pose_f[s][3] < -32767) pose_f[s][3] += 65534;
+    }
     TRACKER_MouseDelta(0, 0, false);
 }
 

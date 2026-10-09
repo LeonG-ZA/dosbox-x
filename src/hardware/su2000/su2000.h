@@ -55,5 +55,11 @@ void FCARD_AddMapperKeys(void);
 void FCARD_GetStick(int &x, int &y);
 void FCARD_SetButton(unsigned bit, bool pressed);
 void TRACKER_SetMouse(bool on);
+void TRACKER_XRPose(const double *head, const double *hand, bool recenter);
+void XR_Setup(int port);
+void XR_Shutdown(void);
+bool XR_Active(void);
+void XR_PushFrame(const PixFrame *ch, unsigned n, bool stereo);
+void XR_Poll(void);
 
 #endif

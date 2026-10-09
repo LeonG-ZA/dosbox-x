@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug SDL2|ARM">
@@ -1537,6 +1537,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\hardware\su2000\m88110.cpp" />
     <ClCompile Include="..\src\hardware\su2000\fcard.cpp" />
     <ClCompile Include="..\src\hardware\su2000\sscape.cpp" />
+    <ClCompile Include="..\src\hardware\su2000\xrserver.cpp" />
     <ClCompile Include="..\src\hardware\iohandler.cpp" />
     <ClCompile Include="..\src\hardware\ipx.cpp" />
     <ClCompile Include="..\src\hardware\ipxserver.cpp" />

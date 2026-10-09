@@ -216,6 +216,7 @@ static void su2k_display_close(void) {
 static void su2k_display_tick(Bitu val) {
     (void)val;
     PIX1000_Tick();
+    XR_Poll();
     const unsigned ncards = PIX1000_NumCards();
     /* Build video channels from the processor cards: a card whose band starts at line 0 begins a channel, a card whose
      * band starts further down contributes its lines to the previous channel (SU2000 Solo: two cards, one picture). */
@@ -246,6 +247,7 @@ static void su2k_display_tick(Bitu val) {
         if (f[i].height > h) h = f[i].height;
     }
     if (any_new && w && h) {
+        XR_PushFrame(f, n, PIX1000_Stereo());
         if (!su2k_frame_dir.empty()) {
             char name[1024];
             snprintf(name, sizeof(name), "%s/pix%06u.ppm", su2k_frame_dir.c_str(), su2k_dumped++);
@@ -299,6 +301,7 @@ static void su2k_display_tick(Bitu val) {
 static void SU2000_Teardown(void) {
     if (!su2k_active) return;
     PIC_RemoveEvents(su2k_display_tick);
+    XR_Shutdown();
     PIX1000_Shutdown();
     TRACKER_Shutdown();
     FCARD_Shutdown();
@@ -364,6 +367,7 @@ static void SU2000_OnReset(Section *sec) {
         TRACKER_SetHandTarget(s->Get_string("tracker hand target"));
         TRACKER_SetMouse(s->Get_bool("tracker mouse"));
     }
+    XR_Setup(s->Get_int("vr port"));
     {
         /* format/control cards: "ctrl ports" and "ctrl mem" pair up in order */
         uint32_t cio[2], cmem[2];
@@ -440,6 +444,9 @@ void SU2000_AddConfigSection(Config *conf) {
                     "and both cameras are moved sideways by half the stereo separation. Doubles the PIX emulation work.");
     Pdouble = secprop->Add_double("stereo separation", Property::Changeable::WhenIdle, 65.0);
     Pdouble->Set_help("Distance between the two eye cameras in game units (DAC: about 1 unit = 1 mm).");
+    Pint = secprop->Add_int("vr port", Property::Changeable::WhenIdle, 0);
+    Pint->Set_help("If not 0, serve the WebXR headset page on this TCP port (http://localhost:<port>/): video goes to the\n"
+                   "headset, head / controller poses and buttons come back as the tracker and format card. 0 = off.");
     Pbool = secprop->Add_bool("pix window", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Show the PIX video channels in a separate window (SDL2 builds).");
     Pstring = secprop->Add_string("pix frame dump", Property::Changeable::WhenIdle, "");
