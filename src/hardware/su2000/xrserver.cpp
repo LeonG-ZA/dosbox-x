@@ -11,7 +11,8 @@
  *      "SUJ1" u32 frame, u8 eye, u8 eyes, u16 chunk, u16 chunks, u16 width, u16 height, u16 flags (bit0 = emulator
  *             stereo, bit1 = PNG instead of JPEG), f32 head pose [px py pz qx qy qz qw] the frame was taken with, then a piece of the eye's image
  *      "SUA1" u32 seq, u16 rate, u16 frames, then frames * 2 int16 (left, right): game audio, about 10 ms per packet
- *      "SUM1" u32 seq, u16 rate, u16 frames, then int16 mono: the other player's microphone (Visette intercom)
+ *      "SUV1" u32 seq, u16 rate, u16 frames, f32 left gain, f32 right gain, then int16 mono: the other player's
+ *             microphone (Visette intercom), with the levels the listener's format card gives MICNET
  *    client -> server
  *      "SUM1" ...       this player's microphone
  *      text "P hx hy hz hqx hqy hqz hqw c cx cy cz cqx cqy cqz cqw buttons"   (c = 1 if a controller pose is given)
@@ -752,7 +753,19 @@ void serve_ws(Conn &c, std::string buf) {
             std::lock_guard<std::mutex> lk(aud_mtx);
             for (const auto &p : audio_q) if (p.seq > audio_sent) pk.push_back(p.data);
             audio_sent = audio_seq;
-            for (const auto &p : mic_q) if (p.seq > mic_sent && p.from != cl.player) pk.push_back(p.data);
+            /* the other player's voice, with the left / right levels this player's format card gives MICNET (DAC
+               places the opponent's voice by direction); centred at full level while the game has not set them */
+            float gl = 1.0f, gr = 1.0f;
+            FCARD_GetMicnet((unsigned)cl.player - 1, gl, gr);
+            for (const auto &p : mic_q)
+                if (p.seq > mic_sent && p.from != cl.player && p.data.size() >= 12) {
+                    std::string v = "SUV1";
+                    v.append(p.data, 4, 8);
+                    v.append((const char *)&gl, 4);
+                    v.append((const char *)&gr, 4);
+                    v.append(p.data, 12, std::string::npos);
+                    pk.push_back(v);
+                }
             mic_sent = mic_seq;
         }
         for (const auto &p : pk) if (!client_send(cl, c, p, false)) ok = false;

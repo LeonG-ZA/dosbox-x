@@ -40,6 +40,10 @@ struct FormatCard {
     double timer_t0 = 0;          /* emulated ms when the 8254 counters were (re)programmed */
     uint32_t latched = 0xFFFFFFFFu;
     unsigned latch_reads[3] = {0, 0, 0};
+    uint8_t mix[32][2] = {};      /* mixer values per register, left / right */
+    uint8_t mix_reg = 0;
+    bool mix_have_reg = false;
+    bool micnet_used = false;    /* the game has set the MICNET (other players' microphones) level */
     IO_ReadHandleObject rd;
     IO_WriteHandleObject wr;
 };
@@ -148,6 +152,19 @@ void io_write(Bitu port, Bitu val, Bitu iolen) {
     FormatCard *c = card_for_port(port);
     if (!c) return;
     const unsigned r = (unsigned)(port - c->io);
+    if (r == 5) {
+        /* mixer: register byte, then value byte (CTRLI_FCD_UpdateMixer); register | 0x20 = left only, | 0x40 = right only */
+        if (!c->mix_have_reg) { c->mix_reg = (uint8_t)val; c->mix_have_reg = true; }
+        else {
+            c->mix_have_reg = false;
+            const unsigned reg = c->mix_reg & 0x1Fu, side = c->mix_reg & 0x60u;
+            if (reg == 0x14 && (val & 0x1Fu)) c->micnet_used = true;
+            if (side != 0x40) c->mix[reg][0] = (uint8_t)val;
+            if (side != 0x20) c->mix[reg][1] = (uint8_t)val;
+            static unsigned logged = 0;
+            if (logged++ < 32) LOG_MSG("SU2000: format card %u mixer reg %02x = %02x", (unsigned)(c - cards), c->mix_reg, (unsigned)val);
+        }
+    }
     if (r == 3) {
         if ((val & 0xC0) == 0xC0) {            /* read-back command: latch the counters */
             c->latched = timer_value(*c);
@@ -221,6 +238,16 @@ void FCARD_GetStick(int &x, int &y) { x = joy_x; y = joy_y; }
 void FCARD_SetButton(unsigned bit, bool pressed) { map_button(bit, pressed); }
 /* Visette microphone level of one card (player), 0..255: shared-memory byte 0x17, read by CTRL_GetMic */
 void FCARD_SetMicLevel(unsigned card, uint8_t level) { if (card < ncards) cards[card].ram[0x17] = level; }
+
+/* Left / right gain (0..1) the game gives the MICNET input of a card: signal 0x20, mixer register 0x14 (DAC.EXE signal
+   table at file offset 0xf1210), 5-bit levels. DAC sets it from the opponent's direction (SOUND_handle -> CTRL_SetFade).
+   Returns false while the game has not set it. */
+bool FCARD_GetMicnet(unsigned card, float &left, float &right) {
+    if (card >= ncards || !cards[card].micnet_used) return false;
+    left = (float)(cards[card].mix[0x14][0] & 0x1Fu) / 31.0f;
+    right = (float)(cards[card].mix[0x14][1] & 0x1Fu) / 31.0f;
+    return true;
+}
 
 void FCARD_AddMapperKeys(void) {
     MAPPER_AddHandler(key_coin, MK_9, MMOD1, "su2k_coin", "SU2000 coin");
