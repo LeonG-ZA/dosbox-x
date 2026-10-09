@@ -304,6 +304,7 @@ void handle_mic(const char *d, size_t n, int player) {
     for (unsigned i = 0; i < frames; i++) { const int v = abs((int)(int16_t)get16(d + 12 + 2 * i)); if (v > peak) peak = v; }
     mic_level[player - 1] = peak >> 7;
     mic_time[player - 1] = now_ms();
+    SMC_SendVoice(d, 12 + (size_t)frames * 2);        /* to the other pods (MICNET line) */
     std::lock_guard<std::mutex> lk(aud_mtx);
     Packet p;
     p.seq = ++mic_seq;
@@ -1008,6 +1009,21 @@ void XR_Shutdown(void) {
 }
 
 bool XR_Active(void) { return running && p1_clients > 0; }
+
+/* A microphone packet from a player at another pod (SMC link): every local headset hears it, panned by its format
+   card's MICNET levels. */
+void XR_RemoteVoice(const char *d, size_t n) {
+    if (!running || n < 12 || memcmp(d, "SUM1", 4) != 0) return;
+    const unsigned frames = get16(d + 10);
+    if (12 + (size_t)frames * 2 > n) return;
+    std::lock_guard<std::mutex> lk(aud_mtx);
+    Packet p;
+    p.seq = ++mic_seq;
+    p.from = 3;                                    /* not a local player */
+    p.data.assign(d, 12 + (size_t)frames * 2);
+    mic_q.push_back(std::move(p));
+    while (mic_q.size() > 50) mic_q.pop_front();
+}
 
 void XR_CardAudio(unsigned card, unsigned rate, unsigned frames, const int16_t *lr) {
     if (running && card < 2) audio_push(card + 1, rate, frames, lr);

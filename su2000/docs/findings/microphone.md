@@ -47,7 +47,7 @@ So the microphone was an intercom between the players of linked pods (and of the
 * The relayed voice is played with the left / right MICNET levels of the **listener's** format card (register 0x94, fcard.cpp
   `FCARD_GetMicnet`), so it comes from the direction the game gives it. Until a game writes a non-zero MICNET level the
   voice plays centred at full level. Verified by writing the register directly (left 31, right 8 -> gains 1.0 / 0.26).
-* No game drives it yet in the emulator: in DAC the opponent with a voice is a human at a second, networked pod
-  (`micnet[]` is never activated in a one-pod game; the network card is not emulated), and DN2 (two players on one PC)
-  stops at start-up because it loads its sounds onto a second Soundscape card, which is not emulated.
+* With linked pods (`[su2000] network`) DAC drives it: in a two-pod match it writes MICNET levels (for example left 24,
+  right 0), and microphone packets travel between the emulators with the frames (`SU2V`), so a headset on one pod hears
+  the player of the other pod from the direction the game sets. In a one-pod game `micnet[]` is never activated.
 * Not yet: side-tone, MICNET master volume.

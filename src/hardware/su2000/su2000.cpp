@@ -315,6 +315,7 @@ static void SU2000_Teardown(void) {
     TRACKER_Shutdown();
     FCARD_Shutdown();
     SSCAPE_Shutdown();
+    SMC_Shutdown();
     su2k_display_close();
     for (auto *p : su2k_rd) delete p;
     for (auto *p : su2k_wr) delete p;
@@ -388,17 +389,19 @@ static void SU2000_OnReset(Section *sec) {
         while (nm < 2 && in2 >> t) cmem[nm++] = parse_hex(t);
         FCARD_Setup(cio, cmem, ni < nm ? ni : nm);
         SSCAPE_Setup(s->Get_string("sound port"));
+        SMC_Setup(s->Get_string("network card"), s->Get_string("network"), s->Get_string("network mac"));
     }
 
     /* Logging-only stubs (Milestone 3 replaces these) */
-    std::istringstream ports(s->Get_string("stub ports"));
+    /* the network card replaces the logging stubs on its ports and memory */
+    std::istringstream ports(SMC_Installed() ? "" : s->Get_string("stub ports"));
     std::string tok;
     while (ports >> tok) {
         /* "base:count" */
         const size_t c = tok.find(':');
         su2k_stub_ports(parse_hex(tok.substr(0, c)), c == std::string::npos ? 8u : (unsigned int)parse_hex(tok.substr(c + 1)));
     }
-    std::istringstream wins(s->Get_string("stub windows"));
+    std::istringstream wins(SMC_Installed() ? "" : s->Get_string("stub windows"));
     while (wins >> tok) {
         const size_t c = tok.find(':');
         su2k_stub_window(parse_hex(tok.substr(0, c)), c == std::string::npos ? 0x1000u : parse_hex(tok.substr(c + 1)));
@@ -483,7 +486,16 @@ void SU2000_AddConfigSection(Config *conf) {
     Pstring = secprop->Add_string("sound port", Property::Changeable::WhenIdle, "0x330:7");
     Pstring->Set_help("Ensoniq Soundscape cards as port:irq[:dma], up to two (CONFIG.VPC [SND] sound1 / sound2), e.g. 0x330:7 (Solo)\n"
                     "or 0x330:12:1 0x350:7:3 (two-player cabinet); 0 = off. Set [midi] mpu401=none, the first card uses 0x330.");
-    Pstring = secprop->Add_string("stub ports", Property::Changeable::WhenIdle, "0x280:32");
+    Pstring = secprop->Add_string("network", Property::Changeable::WhenIdle, "off");
+    Pstring->Set_help("Pod linking: emulate the SMC 8013 network card and carry its frames over UDP.\n"
+                      "  relay:<port>      this DOSBox-X also passes every frame on to all the other pods (run one of these)\n"
+                      "  <host>:<port>     connect to the DOSBox-X running the relay\n"
+                      "  off               no network card (default).\n"
+                      "The game's CONFIG.VPC needs its [NET] section (IRQ 5, IO_ADDRESS 0x280, MEM_ADDRESS 0xC8000).");
+    Pstring = secprop->Add_string("network card", Property::Changeable::WhenIdle, "0x280:5:0xC8000");
+    Pstring->Set_help("SMC 8013 I/O port, IRQ and shared memory as io:irq:memory (CONFIG.VPC [NET]).");
+    Pstring = secprop->Add_string("network mac", Property::Changeable::WhenIdle, "");
+    Pstring->Set_help("Station address of the network card (xx:xx:xx:xx:xx:xx); empty = 00:00:C0 and three random bytes.");    Pstring = secprop->Add_string("stub ports", Property::Changeable::WhenIdle, "0x280:32");
     Pstring->Set_help("Logging-only I/O ranges base:count (network card).");
     Pstring = secprop->Add_string("tracker ports", Property::Changeable::WhenIdle, "0x270 0x278");
     Pstring->Set_help("I/O base of each InsideTrak card (CONFIG.VPC [TRK] TRACKERn IO_ADDRESS).");
