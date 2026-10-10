@@ -28,6 +28,7 @@
 #include <chrono>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -433,8 +434,10 @@ void SMC_Setup(const char *card_spec, const char *link, const char *mac) {
     /* station address: SMC prefix 00:00:C0, the rest from the setting or random */
     unsigned m[6] = { 0x00, 0x00, 0xC0, 0, 0, 0 };
     if (!mac || sscanf(mac, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
-        srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)&card);
-        for (int i = 3; i < 6; i++) m[i] = (unsigned)(rand() & 0xFF);
+        /* pods started in the same second must still differ: DAC ignores packets from its own address */
+        std::random_device rd;
+        const unsigned r = rd() ^ (unsigned)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        for (int i = 3; i < 6; i++) m[i] = (r >> (8 * (i - 3))) & 0xFFu;
     }
     for (int i = 0; i < 6; i++) card.prom[i] = (uint8_t)m[i];
     card.prom[6] = 0x04;               /* board id: revision 2 (bits 4..1), no interface-chip extras */
