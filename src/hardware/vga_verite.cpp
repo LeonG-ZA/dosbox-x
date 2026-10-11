@@ -922,27 +922,22 @@ void VERITE_Destroy(Section * /*sec*/) {
 /* The board's ROM as the RISC sees it (0xfffe0000 up): a dump of the user's own board EPROM,
  * up to 128K bytes, read by software that expects a particular board's ROM */
 void LoadBoardRom(Section_prop *section) {
+	/* without a dump, DOSBox-X's own loader stands in for the board's when CGL modules run */
+	std::vector<uint8_t> own(Verite::ROM_SIZE);
+	Verite::Core::BuildLoaderRom(own.data(), (uint32_t)own.size());
+	board->core->SetRom(own.data(), (uint32_t)own.size());
 	Prop_path *pp = section ? section->Get_path("verite_bios") : NULL;
-	if (!pp || pp->realpath.empty()) {
-		/* no dump: DOSBox-X's own loader stands in for the board's when CGL modules run */
-		if (section && !strcasecmp(section->Get_string("verite_cgl"), "loader")) {
-			std::vector<uint8_t> rom(Verite::ROM_SIZE);
-			Verite::Core::BuildLoaderRom(rom.data(), (uint32_t)rom.size());
-			board->core->SetRom(rom.data(), (uint32_t)rom.size());
-			LOG_MSG("Verite: board ROM with DOSBox-X's loader for CGL modules");
-		}
-		return;
-	}
+	if (!pp || pp->realpath.empty()) return;
 	FILE *f = fopen(pp->realpath.c_str(), "rb");
 	if (!f) {
-		LOG_MSG("Verite: cannot open the BIOS file %s", pp->realpath.c_str());
+		LOG_MSG("Verite: cannot open the BIOS file %s; using DOSBox-X's loader", pp->realpath.c_str());
 		return;
 	}
 	std::vector<uint8_t> rom(Verite::ROM_SIZE + 1);
 	const size_t n = fread(rom.data(), 1, rom.size(), f);
 	fclose(f);
 	if (n == 0 || n > Verite::ROM_SIZE) {
-		LOG_MSG("Verite: %s is not a BIOS image of up to 128K bytes; ignored", pp->realpath.c_str());
+		LOG_MSG("Verite: %s is not a BIOS image of up to 128K bytes; using DOSBox-X's loader", pp->realpath.c_str());
 		return;
 	}
 	board->core->SetRom(rom.data(), (uint32_t)n);

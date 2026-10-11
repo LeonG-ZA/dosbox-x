@@ -4,15 +4,15 @@ Next version:
     Rendition BIOS extensions that Speedy3D games use. vQuake runs without
     Rendition's BIOS TSR. (LeonG-ZA)
   - Added a built-in CGL driver for Verite games written for Creative's 3D
-    Blaster PCI ([verite] verite_cgl): when a game loads its VRIT*.CGL module,
-    the calls are handled by DOSBox-X. Rebel Moon -3DBLASTER, the Hi-Octane
-    3D Blaster PCI patch, Flight Unlimited, Battle Arena Toshinden, Actua
-    Soccer, UEFA Euro 96, Screamer 2 and Screamer Rally run. (LeonG-ZA)
+    Blaster PCI ([verite] verite_cgl=hle): when a game loads its VRIT*.CGL
+    module, the calls are handled by DOSBox-X. Rebel Moon -3DBLASTER, the
+    Hi-Octane 3D Blaster PCI patch, Flight Unlimited, Battle Arena Toshinden,
+    Actua Soccer, UEFA Euro 96, Screamer 2 and Screamer Rally run. (LeonG-ZA)
   - Added [verite] verite_bios for a dump of the user's own Verite board ROM,
     which the board's RISC sees at its ROM address. (LeonG-ZA)
-  - Added verite_cgl=loader: games' own CGL modules run their microcode on the
-    emulated Verite, with DOSBox-X's loader in place of the board ROM's.
-    (LeonG-ZA)
+  - Games' own CGL modules run their microcode on the emulated Verite
+    ([verite] verite_cgl=native, the default), with DOSBox-X's loader in place
+    of the board ROM's unless verite_bios gives a dump. (LeonG-ZA)
   - Fixed DOS FCB operations trying to read/write from device_CON when performed
     on an unopened or non-existent file. (cimarronm)
   - Don't prompt for working directory when -conf or -userconf is used

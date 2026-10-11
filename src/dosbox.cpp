@@ -3546,14 +3546,13 @@ void DOSBOX_SetupConfigSections(void) {
     Pstring->Set_help("A dump of your own Verite board's BIOS ROM (up to 128K bytes). The board's RISC sees it at its ROM\n"
                     "address, as on the real board; some board makers' drivers read their board's ROM there.");
 
-    const char* verite_cgl_modes[] = { "hle", "bios", "loader", "off", nullptr };
-    Pstring = secprop->Add_string("verite_cgl",Property::Changeable::WhenIdle,"hle");
+    const char* verite_cgl_modes[] = { "native", "hle", nullptr };
+    Pstring = secprop->Add_string("verite_cgl",Property::Changeable::WhenIdle,"native");
     Pstring->Set_values(verite_cgl_modes);
     Pstring->Set_help("How games written for Creative's CGL on the 3D Blaster PCI are run.\n"
-                      "  hle: when a game loads one of its Verite CGL driver modules (VRIT*.CGL), DOSBox-X handles the calls.\n"
-                      "  bios: the game's own module runs on the emulated board, with the board ROM from verite_bios.\n"
-                      "  loader: the game's own module runs on the emulated board, with DOSBox-X's loader in place of the board ROM's.\n"
-                      "  off: the game's own module runs on the emulated board.");
+                      "  native: the game's own Verite CGL driver module (VRIT*.CGL) runs its microcode on the emulated board.\n"
+                      "          The board's loader comes from verite_bios when given, else DOSBox-X provides one.\n"
+                      "  hle:    DOSBox-X handles the module's calls itself and draws on the host.");
 
     secprop=control->AddSection_prop("mixer",&Null_Init);
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);

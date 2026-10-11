@@ -1,7 +1,8 @@
 # CGL board loader for the emulated Rendition Vérité
 
 This document specifies how DOSBox-X starts the RISC for a game's own CGL module when no
-dump of a real board ROM is available (`[verite] verite_cgl=loader`). It describes what a
+dump of a real board ROM is available (`[verite] verite_cgl=native` without `verite_bios`).
+It describes what a
 module expects from the board, what the real board provides, and what DOSBox-X provides in
 its place. See [Rendition-Verite.md](Rendition-Verite.md) for the emulated board and the
 built-in CGL driver.
@@ -13,8 +14,8 @@ functions. The module runs on the host. It drives the board through the I/O regi
 runs its own microcode on the board's RISC. The microcode is part of the module; the board
 supplies only a small RISC program, the loader, that receives the microcode.
 
-With `verite_cgl=hle` DOSBox-X replaces the module. With `off` or `bios` the module runs
-unchanged, and it needs the board to behave as described below.
+With `verite_cgl=hle` DOSBox-X replaces the module. With `native` (the default) the module
+runs unchanged, and it needs the board to behave as described below.
 
 ## 2. What a module does to start the board
 
@@ -69,7 +70,7 @@ VGA BIOS, so the loader has to come from DOSBox-X.
   pattern from the data itself, and the result decodes to valid V1000 instructions (checked
   with all four 1.70 modules). DOSBox-X does not store a pattern.
 
-## 5. What DOSBox-X provides (`verite_cgl=loader`)
+## 5. What DOSBox-X provides
 
 1. **ROM.** When no `verite_bios` is given, the ROM window holds DOSBox-X's own ROM image:
    0xff everywhere, with the loader stub at offset 0x10000.
@@ -81,7 +82,8 @@ VGA BIOS, so the loader has to come from DOSBox-X.
    scrambled section (the plain words don't decode as V1000 instructions), recovers the
    pattern as in section 4, and stores the words at the load address. Then it starts the
    microcode as the real loader does (section 6).
-4. **Setting.** `[verite] verite_cgl` gains `loader`. `bios` keeps using the user's ROM dump.
+4. **Setting.** `[verite] verite_cgl=native` (the default) runs the module. The board ROM
+   is the user's dump from `verite_bios` when one is given, else DOSBox-X's image.
 
 ## 6. Answers found while implementing
 
@@ -101,12 +103,11 @@ VGA BIOS, so the loader has to come from DOSBox-X.
 - The store starts the loader (`LoaderBegin`). While it runs the RISC executes nothing, and
   `LoaderPump` takes the FIFO words on each run of the RISC; `LoaderStore` unscrambles a
   section if needed and writes it to local memory.
-- `vga_verite.cpp` installs the image when `verite_cgl=loader` and no `verite_bios` is
-  given.
+- `vga_verite.cpp` installs the image unless a `verite_bios` dump loads.
 
 ## 8. Testing
 
-With `verite_cgl=loader` the modules' own microcode runs Rebel Moon, Battle Arena Toshinden,
+With `verite_cgl=native` the modules' own microcode runs Rebel Moon, Battle Arena Toshinden,
 Flight Unlimited, Hi-Octane, Screamer 2, Screamer Rally, UEFA Euro 96 and Actua Soccer. The
 older modules (Actua Soccer's) load their unscrambled microcode into local memory themselves
 and need no loader; they run the same way.

@@ -298,15 +298,16 @@ the pixel clock. Spare lines are split between the porches: 320×200 gives CRTCH
 
 Games written for Creative's 3D Blaster PCI use Creative's CGL (Creative Graphics Library),
 not Speedy3D. Creative's Vérité driver, "Verite CGL 1.70 beta 7" (`VRIT?170.CGL`), doesn't
-use the Rendition BIOS. It copies a 520-word RISC loader from the board's EPROM (RISC address
-`FFF10000h`, the half of the EPROM the host never sees) to `3FF800h`, then streams compressed
-microcode for that loader to unpack. DOSBox-X has no board EPROM, and a dump would be a
-closed-source runtime component, so these titles can't run on the emulated RISC.
+use the Rendition BIOS. It copies a RISC loader from the board's ROM to local memory and sends
+its microcode for that loader to store.
 
-Instead, `[verite] verite_cgl=hle` (the default) gives them a built-in CGL driver
-(`src/hardware/verite_cgl.cpp`). `off` leaves the game's own module to run on the board, and
-`bios` does the same with the board ROM from `verite_bios`, and `loader` with DOSBox-X's own
-loader in place of the board ROM's (see "The game's own module" below):
+`[verite] verite_cgl` chooses how these games run:
+
+- `native` (the default): the game's own module runs its microcode on the emulated RISC and
+  pixel engine. The board's loader comes from `verite_bios` when given, else DOSBox-X provides
+  its own (see "The game's own module" below).
+- `hle`: a built-in CGL driver (`src/hardware/verite_cgl.cpp`) handles the module's calls and
+  draws on the host:
 
 - **Loading.** The games link a loader that finds `*.cgl` in their own directory, reads each
   module's header and loads the variant they were built for:
@@ -427,15 +428,14 @@ Status:
   scanline interrupts. These are logged with `verite_debug=true`, which also logs each
   distinct render setup and texture load.
 
-The game's own module (`verite_cgl=off` or `bios`): the 1.70 modules start the board by
+The game's own module (`verite_cgl=native`): the 1.70 modules start the board by
 stepping the RISC through its debug registers, copy a 2K byte RISC loader from the board ROM
 (RISC address 0xfff10000, ROM offset 0x10000) to local memory at 0x3ff800, start the RISC
 there and send their microcode through the FIFO. The V1000 decodes its 128K byte ROM, mirrored,
 in the top 16M bytes of the RISC address space (except the memory-mapped registers), and
-`[verite] verite_bios` loads a dump of the user's own board ROM there. Without a ROM holding
-that loader the RISC runs from an empty loader. The microcode itself is in the module.
-`verite_cgl=loader` gives the board a ROM holding a stub that hands the RISC to DOSBox-X,
-which receives the microcode in place of the board's loader
+`[verite] verite_bios` loads a dump of the user's own board ROM there. Without one, the board
+gets a ROM holding a stub that hands the RISC to DOSBox-X, which receives the microcode in
+place of the board's loader
 ([Rendition-Verite-CGL-loader.md](Rendition-Verite-CGL-loader.md)). With it, the modules' own
 microcode runs Rebel Moon, Battle Arena Toshinden, Flight Unlimited, Hi-Octane, Screamer 2,
 Screamer Rally, UEFA Euro 96, Actua Soccer and Battle Race on the emulated RISC and pixel
