@@ -60,15 +60,9 @@ VGA BIOS, so the loader has to come from DOSBox-X.
 - **Container.** A block that starts with `C3DB`, followed by the block size, a version word,
   the number of sections and the sections. Each section starts with `\xe6DAT`, its size in
   bytes (including the eight bytes after the marker) and its load address; the words follow.
-- **Words.** The module sends the stored words unchanged.
-  - Older modules (1.66, early 1.70) store plain microcode words, in the byte order that the
-    RISC reads them through the FIFO.
-  - The 1.70 modules scramble the words with a repeating 128-byte pattern. The loader on the
-    board undoes it.
-- **Recovering the pattern.** The microcode is about half zero bytes, so for each of the 128
-  byte positions the most common stored byte is the pattern's byte. This recovers the
-  pattern from the data itself, and the result decodes to valid V1000 instructions (checked
-  with all four 1.70 modules). DOSBox-X does not store a pattern.
+- **Words.** The module sends the stored words unchanged; the loader stores them. Older
+  modules (1.66, early 1.70) store the words in the byte order that the RISC reads them
+  through the FIFO; the 1.70 modules store them in a form that the loader converts.
 
 ## 5. What DOSBox-X provides
 
@@ -78,10 +72,9 @@ VGA BIOS, so the loader has to come from DOSBox-X.
    through a reserved control address and wait. The module copies the stub to 0x3ff800 like
    any loader.
 3. **Loader in the emulator.** When the RISC reaches the stub, DOSBox-X takes the FIFO
-   stream: for each section the address, the length and the words. It recognises a
-   scrambled section (the plain words don't decode as V1000 instructions), recovers the
-   pattern as in section 4, and stores the words at the load address. Then it starts the
-   microcode as the real loader does (section 6).
+   stream: for each section the address, the length and the words, which it stores at the
+   load address (converting them as in section 4). Then it starts the microcode as the
+   real loader does (section 6).
 4. **Setting.** `[verite] verite_cgl=native` (the default) runs the module. The board ROM
    is the user's dump from `verite_bios` when one is given, else DOSBox-X's image.
 
@@ -101,15 +94,15 @@ VGA BIOS, so the loader has to come from DOSBox-X.
   0x10000, a stub that stores to `LOADER_PORT` (0xffe01000, just above the pixel engine
   state registers) and waits.
 - The store starts the loader (`LoaderBegin`). While it runs the RISC executes nothing, and
-  `LoaderPump` takes the FIFO words on each run of the RISC; `LoaderStore` unscrambles a
-  section if needed and writes it to local memory.
+  `LoaderPump` takes the FIFO words on each run of the RISC; `LoaderStore` writes a
+  section to local memory.
 - `vga_verite.cpp` installs the image unless a `verite_bios` dump loads.
 
 ## 8. Testing
 
 With `verite_cgl=native` the modules' own microcode runs Rebel Moon, Battle Arena Toshinden,
 Flight Unlimited, Hi-Octane, Screamer 2, Screamer Rally, UEFA Euro 96 and Actua Soccer. The
-older modules (Actua Soccer's) load their unscrambled microcode into local memory themselves
+older modules (Actua Soccer's) load their microcode into local memory themselves
 and need no loader; they run the same way.
 
 Found on the way:

@@ -336,9 +336,9 @@ its microcode for that loader to store.
 - **Screen.**
   - `cglInitScreen` sets a native mode on the emulated Vérité (mode 14 is 640×400) in 5551,
     8888 or 8-bit colour, with one or two buffers.
-  - `cglQueryScreen` and `cglInitScreen` report the texture memory left in
-    `dwUB_BufferSize`. Hi-Octane sizes its texture cache from it; with 0 it reused one
-    staging area for every tile of its menu background.
+  - `cglQueryScreen` and `cglInitScreen` report the texture memory left after the frame
+    buffers. Hi-Octane sizes its texture cache from it; with 0 it reused one staging area
+    for every tile of its menu background.
   - `cglSwapBuffer` flips at the next vertical sync and returns only then: it re-runs its
     stub until the sync, so games draw no faster than the display refreshes.
     `cglCopyDisplayBuffer` (back to front) is paced the same way: at 150 frames a second,
@@ -363,7 +363,7 @@ its microcode for that loader to store.
   - **Texture modes:** modulate, decal and copy.
   - **Transparency:** "overlay" makes texels with a clear 5551 alpha bit transparent, and
     chroma keying is supported.
-  - **Filtering:** bilinear when the environment asks for it (`wTextureFilter` non-zero).
+  - **Filtering:** bilinear when the texture environment asks for filtering.
     Transparent texels (overlay or chroma key) are left out of the blend, so their colour
     doesn't bleed into the edges, and a pixel is a hole when they carry half the weight or
     more. Flight Unlimited sets overlay on all its textures, and asks for filtering when the
@@ -376,9 +376,10 @@ its microcode for that loader to store.
 - **Textures.**
   - Addresses count from the start of texture memory, which begins 64KB after the frame
     buffers: Hi-Octane addresses its staging rows from about 32KB below address 0.
-  - `cglLoadTextureMap` loads at `dwFreeByteAddress` and advances it.
-  - `wBufferWidth` is the card-side row stride, so a game can keep textures in one wide
-    surface.
+  - `cglLoadTextureMap` loads at the free address the game passes and advances it past the
+    texture.
+  - The texture's card-side row stride can be wider than the texture, so a game can keep
+    textures in one wide surface.
   - Addressing is linear, as on the V1000 (which has wrap masks but no clamping): Hi-Octane
     addresses its sources with coordinates past the texture's width and negative rows.
 - **Host access.**
@@ -399,9 +400,8 @@ Status:
   held much longer than a normal keystroke, as the software build (`HIOSW.EXE`) does too.
 - **Battle Arena Toshinden** (v2.0 with the 3D Blaster PCI upgrade `TSDUPGRD`: `TSD.EXE`
   and `VRITB170.CGL`) runs: menus and fights with the 3D stages, shaded fighters, shadows
-  and HUD. Its CD check reads the disc's track table and wants at least 16 tracks: track 2
-  190 to 200 seconds long and track 16 10 to 15 seconds long. A CD image without the audio
-  tracks gives "NO CD DETECTED", which allows only network play.
+  and HUD. It needs a CD image of the original disc, audio tracks included; without them it
+  reports "NO CD DETECTED" and allows only network play.
 - **Actua Soccer** (3D Blaster CD version, `SOC3DB.EXE` from the `SOC3DB` patch) and
   **UEFA Euro 96 England** (`EUROBLST.EXE` with the patch's `VRITB170.CGL`) run matches in
   8-bit colour index mode: Actua at 640×400, Euro 96 at 800×600. Their menus are VESA

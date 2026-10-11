@@ -926,7 +926,7 @@ int16_t CheckScreen(uint32_t p, unsigned &w, unsigned &h, unsigned &fmt, unsigne
 	Verite::Core *c = Card();
 	const uint32_t frame = ((w * FormatBytes(fmt) * h) + 0xFFFu) & ~0xFFFu;
 	if (!c || frame * buffers + TEX_GAP >= c->MemSize()) return ERR_NOT_ENOUGH_VRAM;
-	/* dwUB_BufferSize: the texture memory left, which games size their texture caches by */
+	/* the texture memory left after the frame buffers, which games size their texture caches by */
 	Wr32(p, 10, c->MemSize() - (frame * buffers + TEX_GAP));
 	return ERR_NONE;
 }
@@ -966,10 +966,10 @@ int16_t InitScreen(uint32_t p) {
 }
 
 /* Texture addresses count from the start of texture memory, after the frame buffers. The
- * texture goes to dwFreeByteAddress, which then points past it: a game reusing the structure
- * gets its textures one after another, one filling it in each time places them itself. The host
- * image is packed; on the card the rows are wBufferWidth texels apart (a game may keep its
- * textures in one wide surface). */
+ * texture goes to the free address the game passes, which then points past it: a game reusing
+ * the structure gets its textures one after another, one filling it in each time places them
+ * itself. The host image is packed; on the card the rows are the given row width apart (a
+ * game may keep its textures in one wide surface). */
 int16_t LoadTextureMap(uint32_t p) {
 	Screen &s = rs.scr;
 	Verite::Core *c = Card();

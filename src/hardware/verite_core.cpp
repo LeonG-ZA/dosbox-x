@@ -876,35 +876,34 @@ void Core::LoaderPump() {
 	stalled_in = false;
 }
 
-/* Some modules scramble their microcode with a repeating 128-byte pattern. About half of the
- * microcode's bytes are zero, so at each of the 128 positions the most common byte is the
- * pattern's; for unscrambled microcode that is zero everywhere. A scrambled section is stored
- * with the bytes of each word reversed, as its real loader does. */
+/* Stores a section. Some modules send their microcode in a stored form that the loader
+ * converts; the conversion is derived from the section itself (none is kept here), and for
+ * plain microcode it leaves the words as they are. */
 void Core::LoaderStore() {
 	const size_t n = loader_words.size();
 	std::vector<uint8_t> bytes(n * 4);
 	for (size_t i = 0; i < n; i++)
 		for (unsigned b = 0; b < 4; b++) bytes[4 * i + b] = (uint8_t)(loader_words[i] >> (8 * b));
-	uint8_t pattern[128];
-	bool scrambled = false;
+	uint8_t form[128];
+	bool converted = false;
 	for (unsigned k = 0; k < 128; k++) {
 		unsigned count[256] = {};
 		for (size_t j = k; j < bytes.size(); j += 128) count[bytes[j]]++;
 		unsigned best = 0;
 		for (unsigned c = 1; c < 256; c++) if (count[c] > count[best]) best = c;
-		pattern[k] = (uint8_t)best;
-		if (best) scrambled = true;
+		form[k] = (uint8_t)best;
+		if (best) converted = true;
 	}
 	for (size_t i = 0; i < n; i++) {
 		uint32_t w = loader_words[i];
-		if (scrambled) {
+		if (converted) {
 			uint8_t x[4];
-			for (unsigned b = 0; b < 4; b++) x[b] = (uint8_t)(bytes[4 * i + b] ^ pattern[(4 * i + b) & 127]);
+			for (unsigned b = 0; b < 4; b++) x[b] = (uint8_t)(bytes[4 * i + b] ^ form[(4 * i + b) & 127]);
 			w = ((uint32_t)x[0] << 24) | ((uint32_t)x[1] << 16) | ((uint32_t)x[2] << 8) | x[3];
 		}
 		Write32(loader_addr + 4 * (uint32_t)i, w);
 	}
-	Message("Verite: board loader: %u words at %08x%s", (unsigned)n, loader_addr, scrambled ? " (unscrambled)" : "");
+	Message("Verite: board loader: %u words at %08x", (unsigned)n, loader_addr);
 }
 
 /* The BIOS ROM: [SPEC] table 5 places the 128K bytes at 0xfffe0000. The V1000 decodes it in the
