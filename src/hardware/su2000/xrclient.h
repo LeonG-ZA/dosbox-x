@@ -93,9 +93,17 @@ function videoStart(){
   vdec.configure({codec:VCODEC,optimizeForLatency:true}); vNeedKey=true; vOn=true;
 }
 function askKey(){ const t=performance.now(); if(t-vKeyAsked>300&&ws&&ws.readyState==1){ws.send('K'); vKeyAsked=t;} }
+/* Each decoded frame is copied to an ImageBitmap at once and released: the headset browser (Quest) refuses a VideoFrame
+   as a texture source (GL error 1281 on every upload), and frames kept open stall its hardware decoder. */
+let vCopying=0;
 function videoOut(f){
   const m=vMeta.get(f.timestamp); vMeta.delete(f.timestamp);
-  if(!m){f.close(); return;}
+  if(!m||vCopying>4){ f.close(); if(m) vDropped++; return; }
+  vCopying++;
+  createImageBitmap(f).then(bm=>{ vCopying--; f.close(); videoPair(bm,m); })
+    .catch(e=>{ vCopying--; f.close(); diag('vb','video frame copy failed: '+e); });
+}
+function videoPair(f,m){
   if(m.eyes==1){ showVideo([f],m); return; }
   if(m.eye==0){ if(vPend) vPend.f.close(); vPend={f,m}; return; }
   if(vPend&&vPend.m.id==m.id){ showVideo([vPend.f,f],m); vPend=null; } else f.close();
