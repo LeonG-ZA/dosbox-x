@@ -420,7 +420,9 @@ RamWindow window;
 /* card: "io:irq:memory" (CONFIG.VPC [NET]); link: "relay:<port>" or "<host>:<port>"; mac: "" = random */
 void SMC_Setup(const char *card_spec, const char *link, const char *mac) {
     SMC_Shutdown();
-    if (!link || !*link || !strcmp(link, "off") || !strcmp(link, "false")) return;
+    if (link && !strcmp(link, "none")) return;
+    /* "off": the card is fitted but not linked (a Solo pod has one; DAC's adapter set-up crashes on an empty slot) */
+    const bool linked = link && *link && strcmp(link, "off") && strcmp(link, "false");
     unsigned long io = 0x280, irq = 5, memaddr = 0xC8000;
     if (card_spec && *card_spec) {
         char *e;
@@ -453,7 +455,7 @@ void SMC_Setup(const char *card_spec, const char *link, const char *mac) {
     installed = true;
     LOG_MSG("SU2000: SMC 8013 at %03lxh IRQ %lu RAM %05lxh, station %02x:%02x:%02x:%02x:%02x:%02x", io, irq, memaddr,
             m[0], m[1], m[2], m[3], m[4], m[5]);
-    link_open(link);
+    if (linked) link_open(link);
     PIC_AddEvent(deliver_event, 1.0);
 }
 

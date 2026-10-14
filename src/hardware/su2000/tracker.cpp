@@ -18,6 +18,7 @@
 #include "su2000.h"
 #include "mem.h"
 #include "pic.h"
+#include "paging.h"
 
 #include <deque>
 #include <string>
@@ -27,10 +28,25 @@
 
 namespace {
 
+/* Linear reads that never fault: the DAC hooks below look at memory of whatever game is running, and a guest page fault
+   (mem_readb on an unmapped page) kills it ("Abnormal program termination: Page fault" in Boxing). Unmapped = 0. */
+bool lin_ok(uint32_t a, PhysPt &phys) {
+    PageNum pg = a >> 12;
+    if (!PAGING_MakePhysPage(pg)) return false;
+    phys = (PhysPt)((pg << 12) | (a & 0xfff));
+    return true;
+}
+uint8_t gread8(uint32_t a) { PhysPt p; return lin_ok(a, p) ? phys_readb(p) : 0; }
+uint16_t gread16(uint32_t a) { return (uint16_t)(gread8(a) | gread8(a + 1) << 8); }
+uint32_t gread32(uint32_t a) { return (uint32_t)gread16(a) | (uint32_t)gread16(a + 2) << 16; }
+
 struct InsideTrak {
     uint32_t io = 0;
     std::deque<uint8_t> out;
     std::string cmd;
+    /* alignment frame per station ('A' / 'R'): rows = the frame's x, y, z axes in tracker coordinates */
+    double align[4][3][3] = { { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }, { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+                              { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }, { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } } };
     IO_ReadHandleObject rd;
     IO_WriteHandleObject wr;
 };
@@ -56,7 +72,34 @@ int16_t pose[4][6];
 bool calibrate = false;
 double pose_f[4][6];
 
+void set_alignment(InsideTrak &t, const std::string &line) {
+    /* A<station>,Ox,Oy,Oz,Xx,Xy,Xz,Yx,Yy,Yz: origin, a point on +x, a point in the +y half plane (Polhemus alignment).
+       The origin is ignored: the poses are placed in game units already (see send_record). R<station> = reset. */
+    const unsigned st = (unsigned)atoi(line.c_str() + 1);
+    if (st < 1 || st > 4) return;
+    double (&m)[3][3] = t.align[st - 1];
+    if (line[0] == 'R') {
+        for (int i = 0; i < 3; i++) for (int k = 0; k < 3; k++) m[i][k] = i == k ? 1.0 : 0.0;
+        return;
+    }
+    double v[9];
+    if (sscanf(line.c_str() + 1, "%*u,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) != 9) return;
+    double x[3], y[3];
+    for (int i = 0; i < 3; i++) { x[i] = v[3 + i] - v[i]; y[i] = v[6 + i] - v[i]; }
+    const double nx = sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    if (nx < 1e-9) return;
+    for (int i = 0; i < 3; i++) x[i] /= nx;
+    const double d = x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    for (int i = 0; i < 3; i++) y[i] -= d * x[i];
+    const double ny = sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+    if (ny < 1e-9) return;
+    for (int i = 0; i < 3; i++) { y[i] /= ny; m[0][i] = x[i]; m[1][i] = y[i]; }
+    m[2][0] = x[1] * y[2] - x[2] * y[1]; m[2][1] = x[2] * y[0] - x[0] * y[2]; m[2][2] = x[0] * y[1] - x[1] * y[0];
+}
+bool filter_seen = false;      /* DAC's data object (with this filter string) is in memory */
 void command_line(InsideTrak &t, const std::string &line) {
+    if (!line.empty() && line[0] == 'v') filter_seen = true;
+    if (!line.empty() && (line[0] == 'A' || line[0] == 'R')) set_alignment(t, line);
     if (!line.empty() && line[0] == 'l') {
         /* active station query: bytes 3 and 4 = '1' for sensors 1 and 2 present (TRKI_IT_Open 0x97386) */
         static const char rec[8] = { '2', '1', 'l', '1', '1', ' ', '\r', '\n' };
@@ -104,7 +147,7 @@ struct XrState {
     double hand_off[3] = { 0, 0, 0 };     /* hand relative to the head */
     bool hand = false;
 };
-XrState xr;
+XrState xr[2];                             /* per player: player 2 drives stations 3 / 4 (tracker card 2) */
 double base_pose[2][6];                    /* sensor 1 / 2 words from [su2000] tracker pose */
 
 /* Closed-loop placement of the hand sensor for DAC: the raw -> game mapping of the hand position goes through the
@@ -122,7 +165,8 @@ void place(Placer &P, const double *g, double *r, const double *target) {
     double (&J)[3][3] = P.J;
     double *lastg = P.lastg, *lastr = P.lastr;
     bool &have = P.have;
-    if (have) {
+    static const bool no_broyden = getenv("SU2K_NOBROYDEN") != NULL;     /* debug: keep the starting Jacobian */
+    if (have && !no_broyden) {
         double dr[3], dg[3], n2 = 0;
         for (int i = 0; i < 3; i++) { dr[i] = r[i] - lastr[i]; dg[i] = g[i] - lastg[i]; n2 += dr[i] * dr[i]; }
         if (n2 > 1.0) {
@@ -155,29 +199,62 @@ void place(Placer &P, const double *g, double *r, const double *target) {
     TRACKER_MouseDelta(0, 0, false);
 }
 
+void find_delta(void) {
+    /* find the data object once: the IT filter string "v0.2,0.2,0.8,0.8" is at link address 0xde870 */
+    int32_t &delta = data_delta;
+    if (delta != 0x7fffffff) return;
+    static const char key[] = "v0.2,0.2,0.8,0.8\rx0.2";
+    /* Other games built on the same library (Boxing) have the string too: DAC's sits at a page-aligned delta (0x16e000) */
+    for (uint32_t a = 0x100870; a < 0x1000000 && delta == 0x7fffffff; a += 0x1000) {
+        PhysPt ph;
+        if (!lin_ok(a, ph)) continue;
+        unsigned k = 0;
+        while (key[k] && gread8(a + k) == (uint8_t)key[k]) k++;
+        if (!key[k]) delta = (int32_t)(a - 0xde870);
+    }
+    LOG_MSG("SU2000: DAC data delta %08x", (unsigned)delta);
+    if (delta == 0x7fffffff) delta = 0;
+}
+
+void place_direct(unsigned pl) {
+    const XrState &X = xr[pl];
+    double (&hp)[6] = pose_f[2 * pl], (&dp)[6] = pose_f[2 * pl + 1];
+    /* Any other game: VR positions straight into the raw words. Raw axes = game axes (x right, y forward, z up) at
+       0.0916 mm per word (the default head pose, raw z 22636, is DAC's 2100 mm standing height; the head Jacobian is
+       0.0915 per word) [inferred from DAC]. Offsets are in the head's yaw frame; game azimuth = raw azimuth + pi/2. */
+    if (!X.on) return;
+    static const double S = 1.0 / 0.0916, K = 3.14159265358979 / 32767.0;
+    const double az = hp[3] * K + 3.14159265358979 / 2.0, c = cos(az), s = sin(az);
+    const double *o = X.head_off;
+    for (int i = 0; i < 3; i++) hp[i] = base_pose[0][i];
+    hp[0] += (o[0] * c - o[1] * s) * S; hp[1] += (o[0] * s + o[1] * c) * S; hp[2] += o[2] * S;
+    if (X.hand) {
+        const double *d = X.hand_off;
+        dp[0] = hp[0] + (d[0] * c - d[1] * s) * S;
+        dp[1] = hp[1] + (d[0] * s + d[1] * c) * S;
+        dp[2] = hp[2] + d[2] * S;
+    } else {
+        for (int i = 0; i < 3; i++) dp[i] = base_pose[1][i] + hp[i] - base_pose[0][i];
+    }
+    TRACKER_MouseDelta(0, 0, false);
+}
+
 void debug_game_pose(void) {
     /* DAC.EXE (Solo): head[] at link 0x17d9b0, hand[] at 0x17da10, runtime = link + 0x18c000 [inferred] */
     static double last = -1e9, last_log = -1e9;
     const double now = PIC_FullIndex();
-    if (now - last < (xr.on ? 40 : 100)) return;
-    const bool do_log = (now - last_log) >= 2000;
+    if (now - last < (xr[0].on ? 40 : 100)) return;
+    static const bool fast_log = getenv("SU2K_POSELOG") != NULL;     /* debug: log every sample */
+    const bool do_log = (now - last_log) >= (fast_log ? 0 : 2000);
     if (do_log) last_log = now;
     last = now;
     /* find the data object once: the IT filter string "v0.2,0.2,0.8,0.8" is at link address 0xde870 */
-    int32_t &delta = data_delta;
-    if (delta == 0x7fffffff) {
-        static const char key[] = "v0.2,0.2,0.8,0.8\rx0.2";
-        for (uint32_t a = 0x100000; a < 0x1000000 && delta == 0x7fffffff; a += 1) {
-            unsigned k = 0;
-            while (key[k] && mem_readb(a + k) == (uint8_t)key[k]) k++;
-            if (!key[k]) delta = (int32_t)(a - 0xde870);
-        }
-        LOG_MSG("SU2000: DAC data delta %08x", (unsigned)delta);
-        if (delta == 0x7fffffff) delta = 0;
-    }
+    find_delta();
+    const int32_t delta = data_delta;
+    if (!delta) { place_direct(0); place_direct(1); return; } /* not DAC */
     float v[12];
     for (unsigned i = 0; i < 6; i++) {
-        uint32_t a = mem_readd(0x17d9b0 + delta + 4 * i), b = mem_readd(0x17da10 + delta + 4 * i);
+        uint32_t a = gread32(0x17d9b0 + delta + 4 * i), b = gread32(0x17da10 + delta + 4 * i);
         memcpy(&v[i], &a, 4); memcpy(&v[6 + i], &b, 4);
     }
     /* calibration sweep (su2000 tracker calibrate): perturb hand raw x, y, z by +1000 in turn */
@@ -196,11 +273,11 @@ void debug_game_pose(void) {
         const double az = v[3], c = cos(az), s = sin(az);
         double head_target[3] = { 0.0, 0.0, 2100.0 };
         double ht[3] = { target[0] * c - target[1] * s, target[0] * s + target[1] * c, target[2] };
-        if (xr.on) {
-            const double *o = xr.head_off;
+        if (xr[0].on) {
+            const double *o = xr[0].head_off;
             head_target[0] += o[0] * c - o[1] * s; head_target[1] += o[0] * s + o[1] * c; head_target[2] += o[2];
-            if (xr.hand) {
-                const double *d = xr.hand_off;
+            if (xr[0].hand) {
+                const double *d = xr[0].hand_off;
                 ht[0] = head_target[0] + d[0] * c - d[1] * s; ht[1] = head_target[1] + d[0] * s + d[1] * c; ht[2] = head_target[2] + d[2];
             } else {
                 ht[0] += head_target[0]; ht[1] += head_target[1]; ht[2] += o[2];
@@ -208,11 +285,43 @@ void debug_game_pose(void) {
         }
         place(head_pl, gh, pose_f[0], head_target);
         place(hand_pl, gd, pose_f[1], ht);
+        if (do_log && fast_log) LOG_MSG("SU2000: pose t=%.2f hand game %.0f %.0f %.0f target %.0f %.0f %.0f raw %.0f %.0f %.0f", now / 1000.0,
+                                        gd[0], gd[1], gd[2], ht[0], ht[1], ht[2], pose_f[1][0], pose_f[1][1], pose_f[1][2]);
     }
-    if (do_log) LOG_MSG("SU2000: game gotIm %u sound cards %02x", (unsigned)mem_readb(0x17d554 + delta), (unsigned)mem_readb(0x18e036 + delta));
+    if (do_log) LOG_MSG("SU2000: game gotIm %u sound cards %02x", (unsigned)gread8(0x17d554 + delta), (unsigned)gread8(0x18e036 + delta));
+    if (do_log) LOG_MSG("SU2000: game numPlayers %u game_mode %u %u nextMode %u remote %u", (unsigned)gread32(0xd6cd4 + delta),
+                        (unsigned)gread32(0x17eedc + delta), (unsigned)gread32(0x17eee0 + delta),
+                        (unsigned)gread32(0x18acd4 + delta), (unsigned)gread32(0x18acd8 + delta));
+    if (do_log) for (unsigned p = 2; p < 4; p++) {
+        float v[3]; for (unsigned i = 0; i < 3; i++) { uint32_t u = gread32(0x17d9b0 + p * 0x18 + i * 4 + delta); memcpy(&v[i], &u, 4); }
+        LOG_MSG("SU2000: game player %u head %.0f %.0f %.0f", p + 1, v[0], v[1], v[2]);
+    }
     if (do_log) LOG_MSG("SU2000: game head %.1f %.1f %.1f  %.3f %.3f %.3f   hand %.1f %.1f %.1f  %.3f %.3f %.3f",
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
 }
+
+} // namespace
+
+/* Debug: every change of DAC's game state, sampled from the display tick (also in attract mode, where DAC does not read
+   the tracker). Starts once DAC has opened the tracker (the data object is found on its first record request). */
+void TRACKER_DebugTick(void) {
+    if (!ntrk || !filter_seen) return;
+    find_delta();
+    if (data_delta == 0) return;
+    const int32_t d = data_delta;
+    /* numPlayers, game_mode x2, nextMode, agreed mode (0x18acd8), the other pod's game_mode x2, FourPLink, credits x4, buttons */
+    static uint32_t last[12];
+    const uint32_t cur[12] = { gread32(0xd6cd4 + d), gread32(0x17eedc + d), gread32(0x17eee0 + d), gread32(0x18acd4 + d),
+                               gread32(0x18acd8 + d), gread32(0x17eee4 + d), gread32(0x17eee8 + d), gread16(0x17dc78 + d),
+                               gread16(0x17dc70 + d), gread16(0x17dc72 + d), gread16(0x17dc74 + d) | (uint32_t)gread16(0x17dc76 + d) << 16,
+                               FCARD_GetButtons() };
+    if (memcmp(cur, last, sizeof(cur)) == 0) return;
+    memcpy(last, cur, sizeof(cur));
+    LOG_MSG("SU2000: state t=%.1f numPlayers %u game_mode %u %u nextMode %u agreed %u remote game_mode %u %u 4plink %u credit %u %u remote %u %u buttons %03x",
+            PIC_FullIndex() / 1000.0, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7], cur[8], cur[9], cur[10] & 0xFFFFu,
+            cur[10] >> 16, cur[11]);
+}
+namespace {
 
 void steer(void) {
     /* Ctrl+arrows (the format card stick keys) turn the hand sensor: left/right = azimuth, up/down = elevation */
@@ -229,7 +338,51 @@ void send_record(InsideTrak &t, unsigned sensor) {
     debug_game_pose();
     steer();
     if (sensor < 1 || sensor > 4) return;
-    const int16_t *p = pose[sensor - 1];
+    /* The poses are worked out for DAC's alignment (Solo CONFIG.VPC WORLD_OFFSET 0 0 0 180 0 180 -> 'A' with y and z
+       reversed). Another alignment (e.g. no WORLD_OFFSET: Ghost Train on the two-player disk) gets the same physical pose
+       seen through its own frame: M = A_station * A_DAC^T applied to position and orientation. */
+    int16_t p[6];
+    /* station: card 1 has stations 1 / 2 (player 1), card 2 stations 3 / 4 (player 2; CONFIG.VPC SENSOR_MAP ..12) */
+    const unsigned station = (unsigned)(&t - trk) * 2u + sensor;
+    if (station > 4) return;
+    memcpy(p, pose[station - 1], sizeof(p));
+    {
+        const double (&a)[3][3] = t.align[sensor - 1];
+        static const double base_diag[3] = { 1.0, -1.0, -1.0 };
+        double M[3][3];
+        bool ident = true;
+        for (int i = 0; i < 3; i++)
+            for (int k = 0; k < 3; k++) {
+                M[i][k] = 0;
+                M[i][k] = a[i][k] * base_diag[k];
+            }
+        for (int i = 0; i < 3; i++)
+            for (int k = 0; k < 3; k++)
+                if (fabs(M[i][k] - (i == k ? 1.0 : 0.0)) > 1e-6) ident = false;
+        if (!ident) {
+            static const double K = 3.14159265358979 / 32767.0;
+            const double az = p[3] * K, el = p[4] * K, rl = p[5] * K;
+            const double ca = cos(az), sa = sin(az), ce = cos(el), se = sin(el), cr = cos(rl), sr = sin(rl);
+            /* R = Rz(az) Ry(el) Rx(roll) */
+            const double R[3][3] = { { ca * ce, ca * se * sr - sa * cr, ca * se * cr + sa * sr },
+                                      { sa * ce, sa * se * sr + ca * cr, sa * se * cr - ca * sr },
+                                      { -se, ce * sr, ce * cr } };
+            double Q[3][3], pos[3];
+            for (int i = 0; i < 3; i++) {
+                pos[i] = M[i][0] * p[0] + M[i][1] * p[1] + M[i][2] * p[2];
+                for (int k = 0; k < 3; k++) Q[i][k] = M[i][0] * R[0][k] + M[i][1] * R[1][k] + M[i][2] * R[2][k];
+            }
+            const double q20 = Q[2][0] > 1.0 ? 1.0 : (Q[2][0] < -1.0 ? -1.0 : Q[2][0]);
+            const double ang[3] = { atan2(Q[1][0], Q[0][0]), asin(-q20), atan2(Q[2][1], Q[2][2]) };
+            for (int i = 0; i < 3; i++) {
+                const double v = pos[i] > 32767.0 ? 32767.0 : (pos[i] < -32767.0 ? -32767.0 : pos[i]);
+                double w = ang[i] / K;
+                if (w > 32767.0) w = 32767.0;
+                if (w < -32767.0) w = -32767.0;
+                p[i] = (int16_t)v; p[3 + i] = (int16_t)w;
+            }
+        }
+    }
     uint8_t rec[16];
     rec[0] = '0'; rec[1] = (uint8_t)('0' + sensor);       /* header word [inferred, not checked by DAC] */
     for (unsigned i = 0; i < 6; i++) { rec[2 + 2 * i] = (uint8_t)p[i]; rec[3 + 2 * i] = (uint8_t)((uint16_t)p[i] >> 8); }
@@ -302,6 +455,7 @@ void TRACKER_SetPose(const char *s) {
         if (e == s) { s++; continue; }
         v[n++] = d; s = e;
     }
+    if (n <= 12) for (unsigned i = 12; i < 24; i++) v[i] = v[i - 12];   /* player 2 (stations 3 / 4) starts like player 1 */
     for (unsigned i = 0; i < 24; i++) pose_f[i / 6][i % 6] = v[i];
     for (unsigned i = 0; i < 12; i++) base_pose[i / 6][i % 6] = v[i];
     TRACKER_MouseDelta(0, 0, false);
@@ -324,38 +478,47 @@ static void xr_local(const double *d, double yaw, double *out) {
     out[0] = lx * 1000.0; out[1] = -lz * 1000.0; out[2] = d[1] * 1000.0;
 }
 
-void TRACKER_XRPose(const double *head, const double *hand, bool recenter) {
-    if (!head) { xr = XrState(); return; }
+void TRACKER_XRPose(int player, const double *head, const double *hand, bool recenter) {
+    if (player < 1 || player > 2) return;
+    XrState &X = xr[player - 1];
+    const unsigned h = 2u * (unsigned)(player - 1);
+    if (!head) { X = XrState(); return; }
     static const double K = 32767.0 / 3.14159265358979;
     double yaw, pitch;
     xr_angles(head, yaw, pitch);
-    if (!xr.init || recenter) {
-        xr.yaw0 = yaw;
-        for (int i = 0; i < 3; i++) xr.p0[i] = head[i];
-        xr.init = true;
-        LOG_MSG("SU2000: VR recentre");
+    if (!X.init || recenter) {
+        X.yaw0 = yaw;
+        for (int i = 0; i < 3; i++) X.p0[i] = head[i];
+        X.init = true;
+        LOG_MSG("SU2000: VR recentre (player %d)", player);
     }
-    xr.on = true;
-    double dyaw = yaw - xr.yaw0;
-    pose_f[0][3] = base_pose[0][3] + dyaw * K;
-    pose_f[0][4] = base_pose[0][4] + pitch * K;
-    const double d[3] = { head[0] - xr.p0[0], head[1] - xr.p0[1], head[2] - xr.p0[2] };
-    xr_local(d, yaw, xr.head_off);
-    const double r = sqrt(xr.head_off[0] * xr.head_off[0] + xr.head_off[1] * xr.head_off[1] + xr.head_off[2] * xr.head_off[2]);
-    if (r > 1500.0) for (int i = 0; i < 3; i++) xr.head_off[i] *= 1500.0 / r;
-    xr.hand = hand != NULL;
+    X.on = true;
+    double dyaw = yaw - X.yaw0;
+    pose_f[h][3] = base_pose[0][3] + dyaw * K;
+    pose_f[h][4] = base_pose[0][4] + pitch * K;
+    const double d[3] = { head[0] - X.p0[0], head[1] - X.p0[1], head[2] - X.p0[2] };
+    xr_local(d, yaw, X.head_off);
+    const double r = sqrt(X.head_off[0] * X.head_off[0] + X.head_off[1] * X.head_off[1] + X.head_off[2] * X.head_off[2]);
+    if (r > 1500.0) for (int i = 0; i < 3; i++) X.head_off[i] *= 1500.0 / r;
+    X.hand = hand != NULL;
     if (hand) {
         double hy, hp;
         xr_angles(hand, hy, hp);
-        pose_f[1][3] = base_pose[1][3] + (hy - xr.yaw0) * K;
-        pose_f[1][4] = base_pose[1][4] + hp * K;
+        pose_f[h + 1][3] = base_pose[1][3] + (hy - X.yaw0) * K;
+        pose_f[h + 1][4] = base_pose[1][4] + hp * K;
+        /* wrist roll: the controller's right axis dipping below level (sign unverified; the library negates the roll word) */
+        const double x = hand[3], y = hand[4], z = hand[5], w = hand[6];
+        const double ry = 2.0 * (x * y + w * z), uy = 1.0 - 2.0 * (x * x + z * z);
+        pose_f[h + 1][5] = base_pose[1][5] - atan2(-ry, uy) * K;
+        while (pose_f[h + 1][5] > 32767) pose_f[h + 1][5] -= 65534;
+        while (pose_f[h + 1][5] < -32767) pose_f[h + 1][5] += 65534;
         const double dh[3] = { hand[0] - head[0], hand[1] - head[1], hand[2] - head[2] };
-        xr_local(dh, yaw, xr.hand_off);
+        xr_local(dh, yaw, X.hand_off);
     } else {
-        pose_f[1][3] = base_pose[1][3] + dyaw * K;
-        pose_f[1][4] = base_pose[1][4];
+        pose_f[h + 1][3] = base_pose[1][3] + dyaw * K;
+        pose_f[h + 1][4] = base_pose[1][4];
     }
-    for (int s = 0; s < 2; s++) {
+    for (unsigned s = h; s < h + 2; s++) {
         while (pose_f[s][3] > 32767) pose_f[s][3] -= 65534;
         while (pose_f[s][3] < -32767) pose_f[s][3] += 65534;
     }

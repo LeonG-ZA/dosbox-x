@@ -219,6 +219,7 @@ static void su2k_display_tick(Bitu val) {
     (void)val;
     PIX1000_Tick();
     XR_Poll();
+    TRACKER_DebugTick();
     const unsigned ncards = PIX1000_NumCards();
     /* Build video channels from the processor cards: a card whose band starts at line 0 begins a channel, a card whose
      * band starts further down contributes its lines to the previous channel (SU2000 Solo: two cards, one picture). */
@@ -228,10 +229,26 @@ static void su2k_display_tick(Bitu val) {
     bool any_new = false, have[8] = {false, false, false, false, false, false, false, false};
     unsigned w = 0, h = 0;
     const unsigned nsrc = (PIX1000_Stereo() ? 2u : 1u) * (ncards < 4 ? ncards : 4u);
+    /* a band card joins the picture of the card above it at the same frame number: the older of the two latest */
+    PixFrame lf[8];
+    uint32_t lseq[8] = { 0 };
+    bool lok[8] = { false };
+    for (unsigned i = 0; i < nsrc && i < 8; i++) lok[i] = PIX1000_GetFrame(i, lf[i], lseq[i]);
+    for (unsigned i = 1; i < nsrc && i < 8; i++) {
+        if (!lok[i] || !lok[i - 1] || lf[i].band_lo == 0 || (PIX1000_Stereo() && i == ncards)) continue;
+        const unsigned top = i - 1;
+        if (lseq[top] == lseq[i]) continue;
+        const uint32_t want = lseq[top] < lseq[i] ? lseq[top] : lseq[i];
+        PixFrame a, b;
+        const bool ga = want == lseq[top] || PIX1000_GetFrameSeq(top, want, a);
+        const bool gb = want == lseq[i] || PIX1000_GetFrameSeq(i, want, b);
+        if (ga && gb) { if (want != lseq[top]) lf[top] = a; if (want != lseq[i]) lf[i] = b; }
+    }
     for (unsigned i = 0; i < nsrc; i++) {
         uint32_t seq = 0;
         PixFrame cf;
-        if (!PIX1000_GetFrame(i, cf, seq)) continue;
+        if (i >= 8 || !lok[i]) continue;
+        cf = lf[i]; seq = lseq[i];
         if (seq != su2k_seen_seq[i]) { any_new = true; su2k_seen_seq[i] = seq; su2k_xr_pending |= 1u << i; }
         su2k_xr_all |= 1u << i;
         if (cf.band_lo == 0 || n == 0 || f[n - 1].width != cf.width || (PIX1000_Stereo() && i == ncards)) {
@@ -460,10 +477,11 @@ void SU2000_AddConfigSection(Config *conf) {
     Pint = secprop->Add_int("vr port", Property::Changeable::WhenIdle, 0);
     Pint->Set_help("If not 0, serve the WebXR headset page on this TCP port (http://localhost:<port>/): video goes to the\n"
                    "headset, head / controller poses and buttons come back as the tracker and format card. 0 = off.");
-    Pstring = secprop->Add_string("vr image format", Property::Changeable::WhenIdle, "png");
-    Pstring->Set_help("Images sent to the headset: png (lossless, default; small for the flat-shaded pictures) or jpeg.");
-    Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 95);
-    Pint->Set_help("JPEG quality (10..100) with vr image format = jpeg; above 90 the colour is not subsampled.");
+    Pstring = secprop->Add_string("vr image format", Property::Changeable::WhenIdle, "auto");
+    Pstring->Set_help("Images sent to the headset: auto (default: PNG or JPEG, whichever is smaller for each frame), png (lossless;\n"
+                      "smallest for the flat-shaded pictures) or jpeg (3-4x smaller than PNG on textured scenes such as DN2).");
+    Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 90);
+    Pint->Set_help("JPEG quality (10..100) for vr image format = jpeg or auto; above 90 the colour is not subsampled.");
     Pbool = secprop->Add_bool("vr audio", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Send the emulator's sound to the headset (it still plays on this PC too).");
     Pbool = secprop->Add_bool("vr webrtc", Property::Changeable::WhenIdle, true);
@@ -490,7 +508,8 @@ void SU2000_AddConfigSection(Config *conf) {
     Pstring->Set_help("Pod linking: emulate the SMC 8013 network card and carry its frames over UDP.\n"
                       "  relay:<port>      this DOSBox-X also passes every frame on to all the other pods (run one of these)\n"
                       "  <host>:<port>     connect to the DOSBox-X running the relay\n"
-                      "  off               no network card (default).\n"
+                      "  off               the card is fitted but not linked (default)\n"
+                      "  none              no network card (DAC crashes leaving its settings screen).\n"
                       "The game's CONFIG.VPC needs its [NET] section (IRQ 5, IO_ADDRESS 0x280, MEM_ADDRESS 0xC8000).");
     Pstring = secprop->Add_string("network card", Property::Changeable::WhenIdle, "0x280:5:0xC8000");
     Pstring->Set_help("SMC 8013 I/O port, IRQ and shared memory as io:irq:memory (CONFIG.VPC [NET]).");
@@ -505,7 +524,7 @@ void SU2000_AddConfigSection(Config *conf) {
     Pbool->Set_help("Mouse aims the hand sensor; left button = trigger (Ctrl+5), right button = walk (Ctrl+6). Click the window to capture the mouse.");
     Pstring = secprop->Add_string("tracker hand target", Property::Changeable::WhenIdle, "150 450 1750");
     Pstring->Set_help("DAC only: where the emulated hand sensor is steered to in game coordinates (x y z).");
-    Pstring = secprop->Add_string("tracker pose", Property::Changeable::WhenIdle, "273 -2770 22636 -16384 0 0  273 -2770 22636 -16384 0 32767");
+    Pstring = secprop->Add_string("tracker pose", Property::Changeable::WhenIdle, "273 -2770 22636 -16384 0 32767  273 -2770 22636 -16384 0 32767");
     Pstring->Set_help("Raw InsideTrak words (x y z azimuth elevation roll) for sensor 1, then sensor 2, ...");
     Pstring = secprop->Add_string("stub windows", Property::Changeable::WhenIdle, "0xC8000:0x4000");
     Pstring->Set_help("Logging-only RAM windows base:size (network card).");

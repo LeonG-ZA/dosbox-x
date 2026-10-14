@@ -267,7 +267,16 @@ uint64_t PixBoard::run(uint64_t n) {
                 view_hits++;
             }
             const uint32_t disp = be32(&dram[0x200C]);
-            if (disp != display_base) { display_base = disp; grab_frame(); }
+            if (disp != display_base) {
+                /* The 1994 firmware (Boxing) switches the display when it hands the list to B, before B has drawn it; the
+                   video card shows the new buffer from the next refresh, by then B is done. Grab when B goes idle. */
+                if (grab_pending) grab_frame();
+                display_base = disp;
+                grab_pending = true;
+                /* 1995 firmware (slot +0x100: DN2, SFL, GHOST) swaps after B is done; there, grab at once so the cards of a
+                   split picture (DN2 Solo: two bands) stay on the same frame */
+                if (!b_on || !mainb_poll_pc || slot_off == 0x100) { grab_pending = false; grab_frame(); }
+            }
             if (cpu_a->unknown_count) {
                 pix_logf("PIX: A unknown opcode %08x at %08x\n", cpu_a->last_unknown_inst, cpu_a->last_unknown_pc);
                 cpu_a->unknown_count = 0;
@@ -278,7 +287,10 @@ uint64_t PixBoard::run(uint64_t n) {
             uint64_t left = slice;
             while (left) {
                 const uint32_t bpc = cpu_b->pc;
-                if (bpc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7000 + slot_off]) == 0) break;   /* idle */
+                if (bpc == mainb_poll_pc && mainb_poll_pc && be32(&dram[0x7000 + slot_off]) == 0) {   /* idle */
+                    if (grab_pending) { grab_pending = false; grab_frame(); }
+                    break;
+                }
                 if (bpc && (bpc == disp32 || bpc == disp16)) {
                     /* close the previous record's statistics */
                     if (cur_type >= 0) {

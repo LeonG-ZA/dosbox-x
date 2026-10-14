@@ -484,10 +484,11 @@ void M88110::execute(uint32_t inst, Decoded d) {
         break;
     }
     case OP_PMUL: {
-        /* 64-bit rS1 holds four 16-bit unsigned fields; each is multiplied by the 32-bit rS2 [inferred] */
+        /* the 64-bit rS1 pair times the unsigned 32-bit rS2, low 64 bits. Not field-wise: the 16-bit Gouraud set-up (BOX
+           draw16B 0xce04) multiplies two 32-bit fields of colour differences by 0x10000/width and keeps their high halves;
+           the bitmap blend (byte fields x alpha <= 256) never carries between fields, so it is the same either way. */
         const uint64_t a = ((uint64_t)r[rs1] << 32) | r[(rs1 + 1) & 31];
-        uint64_t out = 0;
-        for (unsigned f = 0; f < 64; f += 16) out |= ((((a >> f) & 0xFFFFu) * r[rs2]) & 0xFFFFu) << f;
+        const uint64_t out = a * (uint64_t)r[rs2];
         D = (uint32_t)(out >> 32);
         r[(rd + 1) & 31] = (uint32_t)out;
         break;

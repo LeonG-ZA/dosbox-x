@@ -103,6 +103,7 @@ public:
 
     /* displayed-frame state */
     uint32_t display_base = 0;        /* VRAM address shown (board 0x200c) */
+    bool     grab_pending = false;    /* display switched; grab once CPU B has drained its draw list */
     PixFrame last_frame;
     void     grab_frame();
     /* Convert the displayed buffer to 0x00RRGGBB. Geometry comes from the firmware globals:

@@ -76,3 +76,19 @@ set-up menu (stand-alone / network master / network slave; `SETTINGS_handle`), s
 the others slave, so each emulator needs its own copy of the drive. The card also had a bug: a command-register
 write without STA / STP (a page switch) stopped reception. With both fixed, two pods (master + slave, separate drive
 copies) receive each other's frames continuously (~25,000 each in two minutes, a few dozen dropped).
+
+## Four pods (2026-10-14)
+
+Four DOSBox-X instances on one PC (pod A relay, B/C/D connected; four drive copies; A master, B/C/D slave in
+`DEFAULTS.DN2`). All four link (`4plink` 1). DAC's four-player start is pairwise: a pod commits only when it has both
+sent a request (`TX_canIStart4`) and received one, so all pods must press start in attract at about the same time.
+Results:
+
+* B, C and D played one four-player match together (scoreboard VEGA / STEALTH / STING / STEALTH, other players
+  visible) while A, which had only sent its request, fell back to a local game.
+* With all four pressing start together every pod reached numPlayers 4 for a moment and then dropped back to
+  numPlayers 2: the pods ended in two-player games.
+* Each pod received ~1,300 frames/s and dropped 4-10% for a full receive ring. The emulated pods run as fast as the
+  PC allows and DAC transmits every frame, so the traffic is far above a real pod's; lost handshake frames are the
+  likely reason the four-pod start falls apart. Next step: pace the link (limit frames per emulated second, or make
+  the receive ring drain faster) before trying four pods again. Two pods remain the tested configuration.

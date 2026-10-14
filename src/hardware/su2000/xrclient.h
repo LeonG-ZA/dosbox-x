@@ -78,6 +78,16 @@ function send(m){
 /* ---- incoming messages ---- */
 let cur=null, fresh=false, lastId=-1, nframes=0, asm=new Map();
 function magic(b){const u=new Uint8Array(b,0,4);return String.fromCharCode(u[0],u[1],u[2],u[3]);}
+let waiting=null, decoding=false, skipped=0;
+function decodeNext(){
+  const w=waiting; waiting=null; if(!w){decoding=false;return;}
+  decoding=true; const {id,a,eyes}=w;
+  Promise.all(a.parts.slice(0,eyes).map(p=>createImageBitmap(new Blob(p,{type:a.png?'image/png':'image/jpeg'})))).then(bm=>{
+    if(id<=lastId){bm.forEach(x=>x.close());return;}
+    lastId=id; if(cur) cur.bm.forEach(x=>x.close());
+    cur={bm,w:a.w,h:a.h,eyes,stereo:a.stereo,pose:a.pose}; fresh=true; nframes++;
+  }).catch(x=>diag('dec','decode failed: '+x)).finally(decodeNext);
+}
 function binary(b){
   if(b.byteLength<12) return;
   const m=magic(b), dv=new DataView(b);
@@ -90,11 +100,9 @@ function binary(b){
     a.parts[eye][ch]=new Uint8Array(b,48); a.got[eye]++; a.need[eye]=chs;
     for(let e=0;e<eyes;e++) if(!a.need[e]||a.got[e]<a.need[e]) return;
     for(const k of asm.keys()) if(k<=id) asm.delete(k);
-    Promise.all(a.parts.slice(0,eyes).map(p=>createImageBitmap(new Blob(p,{type:a.png?'image/png':'image/jpeg'})))).then(bm=>{
-      if(id<=lastId){bm.forEach(x=>x.close());return;}
-      lastId=id; if(cur) cur.bm.forEach(x=>x.close());
-      cur={bm,w:a.w,h:a.h,eyes,stereo:a.stereo,pose:a.pose}; fresh=true; nframes++;
-    }).catch(()=>{});
+    /* one decode at a time; a newer complete frame replaces the waiting one (unbounded decodes ran the headset out of
+       memory when it fell behind: the right eye went black, then the page stopped) */
+    if(waiting) skipped++; waiting={id,a,eyes}; if(!decoding) decodeNext();
     if(asm.size>8) for(const k of asm.keys()) if(k<id-8) asm.delete(k);
   } else if(m==='SUA1'){ if(audio) audio.play(0,dv.getUint16(8,true),new Int16Array(b.slice(12))); }
   else if(m==='SUV1'&&b.byteLength>=20){ if(audio) audio.play(1,dv.getUint16(8,true),new Int16Array(b.slice(20)),dv.getFloat32(12,true),dv.getFloat32(16,true)); }
@@ -218,17 +226,33 @@ void main(){o=texture(t,uv);}`;
   const vb=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb);
   gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
   const al=gl.getAttribLocation(prog,'a'); gl.enableVertexAttribArray(al); gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);
+  texW=[0,0]; texH=[0,0];
   texs=[0,1].map(()=>{const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;});
 }
+/* diagnostics to the emulator log (the right eye was seen to go blank in the headset after some minutes) */
+let diagLast={}, upl=[0,0], uplErr=[0,0], monoFrames=0, texW=[0,0], texH=[0,0];
+function diag(k,m){ const t=performance.now(); if(diagLast[k]&&t-diagLast[k]<5000) return; diagLast[k]=t; if(ws&&ws.readyState==1) ws.send('L '+m); }
 function upload(){
   const f=cur; fresh=false; imgW=f.w; imgH=f.h; poseFrame=f.pose;
+  if(f.eyes!=2) monoFrames++;
   for(let e=0;e<2;e++){
-    gl.bindTexture(gl.TEXTURE_2D,texs[e]);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,f.bm[f.eyes==2?e:0]);
+    const b=f.bm[f.eyes==2?e:0];
+    try{
+      if(!b||!b.width) throw new Error('no bitmap');
+      gl.bindTexture(gl.TEXTURE_2D,texs[e]);
+      /* allocate once per size, then update in place (a new allocation per frame and eye ran the headset out of
+         memory under load: the right eye went black) */
+      if(texW[e]!=b.width||texH[e]!=b.height){ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,b.width,b.height,0,gl.RGBA,gl.UNSIGNED_BYTE,null); texW[e]=b.width; texH[e]=b.height; }
+      gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,b);
+      const ge=gl.getError(); if(ge){ texW[e]=0; throw new Error('GL error '+ge+(ge==1285?' (out of memory)':'')); }
+      upl[e]++;
+    }catch(x){ uplErr[e]++; diag('u'+e,'eye '+e+' upload failed: '+x.message+' ('+(b?b.width+'x'+b.height:'none')+')'); }
   }
 }
+setInterval(()=>{ if(session&&gl) diag('st','status: skipped '+skipped+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
+let lastViews='';
 function sendInput(xf){
   const vp=xf.getViewerPose(ref); if(!vp) return null;
   const t=vp.transform, h=[t.position.x,t.position.y,t.position.z,t.orientation.x,t.orientation.y,t.orientation.z,t.orientation.w];
@@ -261,8 +285,9 @@ function onXR(time,xf){
   const asp=aspectQ||imgW/imgH, hw=DIST*Math.tan(fov*Math.PI/360), hh=hw/asp;
   const M=mul(mul(mul(mul(T(poseFrame[0],poseFrame[1],poseFrame[2]),RY(ang[0])),RX(ang[1])),T(0,0,-DIST)),S(hw,hh,1));
   gl.useProgram(prog); gl.uniformMatrix4fv(loc.M,false,M); gl.uniform1i(loc.t,0); gl.activeTexture(gl.TEXTURE0);
+  lastViews=vp.views.map(v=>{const r=layer.getViewport(v);return v.eye+':'+(r?r.x+','+r.width+'x'+r.height:'none');}).join(' ');
   for(const v of vp.views){
-    const r=layer.getViewport(v); gl.viewport(r.x,r.y,r.width,r.height);
+    const r=layer.getViewport(v); if(!r){diag('vp','no viewport for '+v.eye); continue;} gl.viewport(r.x,r.y,r.width,r.height);
     gl.uniformMatrix4fv(loc.P,false,v.projectionMatrix); gl.uniformMatrix4fv(loc.V,false,v.transform.inverse.matrix);
     gl.bindTexture(gl.TEXTURE_2D,texs[v.eye==='right'?1:0]);
     gl.drawArrays(gl.TRIANGLE_STRIP,0,4);

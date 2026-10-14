@@ -58,6 +58,8 @@ struct ProcCard {
     std::mutex frame_lock;
     PixFrame frame;                         /* last displayed frame (worker -> main thread) */
     std::atomic<uint32_t> frame_seq{0};
+    PixFrame hist[4];                       /* the last frames by sequence number (hist[seq & 3]), for split pictures */
+    uint32_t hist_seq[4] = { 0, 0, 0, 0 };
     uint8_t  ctrl = 0;
     uint8_t  page_hi = 0, page_lo = 0;
     uint8_t  reg[8] = {};
@@ -317,7 +319,10 @@ void frame_cb(PixBoard *b, void *user) {
     c->frame.band_lo = f.band_lo;
     c->frame.band_hi = f.band_hi;
     c->frame.pixels.swap(f.pixels);
-    c->frame_seq++;
+    const uint32_t seq = c->frame_seq.load() + 1;
+    c->hist[seq & 3] = c->frame;
+    c->hist_seq[seq & 3] = seq;
+    c->frame_seq.store(seq);
 }
 
 /* ---- video card (logging only) ----------------------------------------------------------- */
@@ -347,6 +352,17 @@ bool PIX1000_GetFrame(unsigned i, PixFrame &out, uint32_t &seq) {
     return true;
 }
 
+/* Frame number seq of card i if it is still kept (the cards of one picture run on their own threads and can be a
+   frame apart; the display joins bands with the same number). */
+bool PIX1000_GetFrameSeq(unsigned i, uint32_t seq, PixFrame &out) {
+    ProcCard *c = i < ncards ? &cards[i] : (i < 2 * ncards ? &twins[i - ncards] : NULL);
+    if (!c || !c->board) return false;
+    std::lock_guard<std::mutex> g(c->frame_lock);
+    if (c->hist_seq[seq & 3] != seq || !c->hist[seq & 3].width) return false;
+    out = c->hist[seq & 3];
+    return true;
+}
+
 unsigned PIX1000_NumCards(void) { return ncards; }
 bool PIX1000_Stereo(void) { return stereo && emulate; }
 void PIX1000_SetStereo(bool on, float separation) { stereo = on; stereo_sep = separation; }
@@ -364,6 +380,11 @@ void PIX1000_Tick(void) {
                     b->b_on ? "on" : "off", b->cpu_b->pc, (unsigned long long)(b->cpu_b->icount / 1000000),
                     (unsigned)b->fifo_level(), (unsigned long long)b->fifo_overflow, (unsigned long long)b->fifo_pops, (unsigned long long)b->draws, cards[i].ctrl, (unsigned)((b->dram[0x210E] << 8) | b->dram[0x210F]), (unsigned)((b->dram[0x2112] << 8) | b->dram[0x2113]), (unsigned)((b->dram[0x214C] << 8) | b->dram[0x214D]), (unsigned)((b->dram[0x214E] << 8) | b->dram[0x214F]), (unsigned)((b->dram[0x2158] << 8) | b->dram[0x2159]), (unsigned)((b->dram[0x215A] << 8) | b->dram[0x215B]));
             LOG_MSG("SU2000: card %u view hooks hit %llu (twin %llu)", i, (unsigned long long)b->view_hits, twins[i].board ? (unsigned long long)twins[i].board->view_hits : 0ull);
+            if (PixBoard *tb = twins[i].board)
+                LOG_MSG("SU2000: twin %u A %s pc=%08x %lluM  B %s pc=%08x  fifo %u (full hits %llu) pops %llu frames %u/%u", i,
+                        tb->a_on ? "on" : "off", tb->cpu_a->pc, (unsigned long long)(tb->cpu_a->icount / 1000000), tb->b_on ? "on" : "off",
+                        tb->cpu_b->pc, (unsigned)tb->fifo_level(), (unsigned long long)tb->fifo_overflow, (unsigned long long)tb->fifo_pops,
+                        (unsigned)twins[i].frame_seq.load(), (unsigned)cards[i].frame_seq.load());
             LOG_MSG("SU2000: card %u B r1=%08x r8=%08x r10=%08x r18=%08x r19=%08x r29=%08x r30=%08x r31=%08x", i,
                     b->cpu_b->r[1], b->cpu_b->r[8], b->cpu_b->r[10], b->cpu_b->r[18], b->cpu_b->r[19], b->cpu_b->r[29], b->cpu_b->r[30], b->cpu_b->r[31]);
         }

@@ -22,6 +22,7 @@
  */
 
 #include "dosbox.h"
+#include <stdlib.h>
 #include "inout.h"
 #include "mem.h"
 #include "paging.h"
@@ -56,6 +57,7 @@ bool installed = false;
 /* Inputs from the mapper, shared by all cards (one player per card is a later refinement). */
 int joy_x = 0, joy_y = 0;    /* -1, 0, +1 from Ctrl+arrow keys */
 uint16_t in_buttons = 0;     /* bits 0..3 -> byte 0x14 bits 0..3, bits 4..11 -> byte 0x13 */
+uint16_t card_buttons[2] = { 0, 0 };   /* one card only: a headset player's buttons (player n = card n) */
 bool in_coin = false;
 
 FormatCard *card_for_mem(uint32_t a) {
@@ -73,8 +75,9 @@ void refresh(FormatCard &c) {
        first trigger also drives the start bit. */
     /* Ctrl+1..4 = player 1 buttons (0x13 bits 0..3), Ctrl+5..8 = player 2 buttons (bits 4..7). Driving both from one
        key starts a two-player game with an untracked second player. */
-    const uint8_t p13 = (uint8_t)(in_buttons >> 4);
-    c.ram[0x14] = (uint8_t)((c.ram[0x14] & 0xE0u) | (in_buttons & 0x0Fu) | ((p13 & 0x01u) ? 1u : 0u) |
+    const uint16_t btn = (uint16_t)(in_buttons | card_buttons[&c - cards < 2 ? &c - cards : 0]);
+    const uint8_t p13 = (uint8_t)(btn >> 4);
+    c.ram[0x14] = (uint8_t)((c.ram[0x14] & 0xE0u) | (btn & 0x0Fu) | ((p13 & 0x01u) ? 1u : 0u) |
                             ((p13 & 0x10u) ? 2u : 0u) | (in_coin ? 0x10u : 0u));
     c.ram[0x13] = p13;
     c.ram[0x12] = 0;
@@ -214,7 +217,7 @@ void FCARD_Setup(const uint32_t *io, const uint32_t *mem, unsigned n) {
         c.mem = mem[i];
         memset(c.ram, 0, sizeof(c.ram));
         c.ram[0x00] = 0x13;          /* firmware "1.3" [faked] */
-        c.ram[0x06] = 0x81;          /* card type accepted by CTRLI_FCD_Open */
+        c.ram[0x06] = 0x82;          /* card type: CTRLI_FCD_Open takes 0x81 or 0x82, but with 0x81 DN2 (two cards) only opens card 2 */
         c.ram[0x0A] = c.ram[0x0B] = c.ram[0x0C] = c.ram[0x0D] = 0x7F;   /* joysticks centred (game uses 0x7F - raw) */
         c.timer_t0 = PIC_FullIndex();
         c.rd.Install(c.io, io_read, IO_MA, 8);
@@ -241,6 +244,11 @@ void FCARD_Shutdown(void) {
 
 void FCARD_GetStick(int &x, int &y) { x = joy_x; y = joy_y; }
 void FCARD_SetButton(unsigned bit, bool pressed) { map_button(bit, pressed); }
+uint16_t FCARD_GetButtons(void) { return in_buttons | card_buttons[0]; }
+void FCARD_SetPlayerButton(unsigned card, unsigned bit, bool pressed) {
+    if (card > 1) return;
+    if (pressed) card_buttons[card] |= (uint16_t)(1u << bit); else card_buttons[card] &= (uint16_t)~(1u << bit);
+}
 /* Visette microphone level of one card (player), 0..255: shared-memory byte 0x17, read by CTRL_GetMic */
 void FCARD_SetMicLevel(unsigned card, uint8_t level) { if (card < ncards) cards[card].ram[0x17] = level; }
 

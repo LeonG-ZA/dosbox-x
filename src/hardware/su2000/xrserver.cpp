@@ -105,6 +105,18 @@ typedef int sock_t;
 #include <psa/crypto.h>
 #endif
 
+/* PNG deflate by zlib: ~25% smaller than stb's own (DN2 attract: 107 vs 144 KB per stereo frame) */
+#include <zlib.h>
+#include <stdlib.h>
+static unsigned char *png_zlib(unsigned char *data, int len, int *out_len, int quality) {
+    (void)quality;
+    uLongf n = compressBound((uLong)len);
+    unsigned char *out = (unsigned char *)malloc(n);
+    if (!out || compress2(out, &n, data, (uLong)len, 6) != Z_OK) { free(out); return NULL; }
+    *out_len = (int)n;
+    return out;
+}
+#define STBIW_ZLIB_COMPRESS png_zlib
 #define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
@@ -172,8 +184,8 @@ double now_ms(void) {
 }
 
 /* ---- settings ---- */
-int jpeg_quality = 95;
-bool use_png = true;            /* lossless; smaller than JPEG on the flat-shaded PIX pictures */
+int jpeg_quality = 90;
+int img_mode = 2;               /* 0 png (lossless; smallest on flat-shaded pictures), 1 jpeg (textured ones), 2 the smaller per frame */
 bool audio_on = true;
 bool rtc_on = true;
 std::string cert_base = "su2000vr";
@@ -184,13 +196,14 @@ std::vector<PixFrame> channels;    /* latest video channels (left eyes first whe
 bool chan_stereo = false;
 uint32_t frame_seq = 0;
 float frame_pose[2][7];            /* each player's head pose when the frame was taken */
-unsigned drawn_w[8], drawn_for[8]; /* widest drawn column per channel (the game may draw into part of the line) */
+unsigned drawn_w[8], drawn_for[8], drawn_narrow[8]; /* drawn width per channel (the game may draw into part of the line) */
 
 struct Encoded {
     uint32_t seq = 0;
     std::vector<std::string> jpg;  /* per eye */
     unsigned w = 0, h = 0;
     bool stereo = false;
+    bool png = false;
     float pose[7];
 };
 std::mutex enc_mtx;
@@ -220,18 +233,26 @@ std::shared_ptr<const Encoded> encoded(int player) {
         memcpy(e->pose, frame_pose[player - 1], sizeof(e->pose));
         /* drawn width, kept per channel */
         const unsigned w = eye[0].width, h = eye[0].height;
-        if (drawn_for[ci] != w) { drawn_for[ci] = w; drawn_w[ci] = 8; }
-        for (unsigned y = 0; y < h; y += 4) {
-            const uint32_t *row = &eye[0].pixels[(size_t)y * w];
-            for (unsigned x = w; x-- > drawn_w[ci];)
-                if (row[x] & 0xFFFFFFu) { drawn_w[ci] = (x + 8) & ~7u; if (drawn_w[ci] > w) drawn_w[ci] = w; break; }
-        }
+        if (drawn_for[ci] != w) { drawn_for[ci] = w; drawn_w[ci] = 8; drawn_narrow[ci] = 0; }
+        /* widest drawn column of this frame, both eyes. Grows at once; shrinks after 2 s narrower (a full-width flash
+           used to keep the crop at the whole 768-pixel line for good: 4x the data, and the headset fell behind) */
+        unsigned now_w = 8;
+        for (unsigned k = 0; k < (e->stereo ? 2u : 1u); k++)
+            for (unsigned y = 0; y < h && y * w < eye[k].pixels.size(); y += 4) {
+                const uint32_t *row = &eye[k].pixels[(size_t)y * w];
+                for (unsigned x = w; x-- > now_w;)
+                    if (row[x] & 0xFFFFFFu) { now_w = (x + 8) & ~7u; if (now_w > w) now_w = w; break; }
+            }
+        if (now_w >= drawn_w[ci]) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
+        else if (++drawn_narrow[ci] > 100) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
         crop = drawn_w[ci];
     }
     const unsigned w = eye[0].width, h = eye[0].height;
     if (!w || !h) return NULL;
     e->w = crop; e->h = h;
     std::vector<uint8_t> rgb((size_t)crop * h * 3);
+    std::vector<std::string> alt;          /* auto: the JPEG versions, kept if smaller in total */
+    size_t png_total = 0, jpg_total = 0;
     for (unsigned k = 0; k < (e->stereo ? 2u : 1u); k++) {
         for (unsigned y = 0; y < h; y++)
             for (unsigned x = 0; x < crop; x++) {
@@ -240,10 +261,17 @@ std::shared_ptr<const Encoded> encoded(int player) {
                 p[0] = (uint8_t)(c >> 16); p[1] = (uint8_t)(c >> 8); p[2] = (uint8_t)c;
             }
         std::string out;
-        if (use_png) stbi_write_png_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), (int)crop * 3);
-        else stbi_write_jpg_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), jpeg_quality);   /* > 90: no chroma subsampling */
+        if (img_mode != 1) { stbi_write_png_to_func(jpg_write, &out, (int)crop, (int)h, 3, rgb.data(), (int)crop * 3); png_total += out.size(); }
+        if (img_mode != 0) {   /* quality > 90: no chroma subsampling */
+            std::string j;
+            stbi_write_jpg_to_func(jpg_write, &j, (int)crop, (int)h, 3, rgb.data(), jpeg_quality);
+            jpg_total += j.size();
+            if (img_mode == 1) out.swap(j); else alt.push_back(j);
+        }
         e->jpg.push_back(out);
     }
+    e->png = img_mode == 0 || (img_mode == 2 && png_total <= jpg_total);
+    if (img_mode == 2 && !e->png) e->jpg.swap(alt);
     std::lock_guard<std::mutex> lk2(enc_mtx);
     enc_cache[player - 1] = e;
     return e;
@@ -324,10 +352,10 @@ struct Input {
     uint32_t seq = 0;
 };
 Input inputs[2];
-uint32_t input_seen = 0;
-unsigned recenter_seen = 0;
-std::atomic<int> p1_clients(0);
-unsigned applied_buttons = 0;
+uint32_t input_seen[2] = { 0, 0 };
+unsigned recenter_seen[2] = { 0, 0 };
+std::atomic<int> p1_clients(0), p2_clients(0);
+unsigned applied_buttons[2] = { 0, 0 };
 
 void handle_input(const std::string &msg, int player) {
     if (msg.empty()) return;
@@ -672,7 +700,7 @@ bool send_frame(Client &cl, Conn &c, const Encoded &e) {
             put32(m, e.seq);
             m.push_back((char)k); m.push_back((char)eyes);
             put16(m, (uint16_t)ch); put16(m, (uint16_t)chunks);
-            put16(m, (uint16_t)e.w); put16(m, (uint16_t)e.h); put16(m, (uint16_t)((e.stereo ? 1 : 0) | (use_png ? 2 : 0)));
+            put16(m, (uint16_t)e.w); put16(m, (uint16_t)e.h); put16(m, (uint16_t)((e.stereo ? 1 : 0) | (e.png ? 2 : 0)));
             m.append((const char *)e.pose, sizeof(e.pose));
             const size_t off = ch * max_piece;
             m.append(j, off, j.size() - off < max_piece ? j.size() - off : max_piece);
@@ -688,13 +716,16 @@ void handle_ws_text(Client &cl, const std::string &msg) {
     case 'S': {
         const int p = atoi(msg.c_str() + 1) == 2 ? 2 : 1;
         if (p != cl.player) {
-            if (cl.player == 1) p1_clients--;
-            if (p == 1) p1_clients++;
+            if (cl.player == 1) p1_clients--; else p2_clients--;
+            if (p == 1) p1_clients++; else p2_clients++;
             cl.player = p;
             LOG_MSG("SU2000: VR client now on player %d", p);
         }
         break;
     }
+    case 'L':   /* diagnostics from the headset page */
+        if (msg.size() > 2) LOG_MSG("SU2000: VR client (player %d) says: %s", cl.player.load(), msg.substr(2, 200).c_str());
+        break;
 #if C_SU2000_VRLINK
     case 'O':
         if (rtc_on && msg.size() > 2) rtc_offer(cl, msg.substr(2));
@@ -814,7 +845,7 @@ void serve_ws(Conn &c, std::string buf) {
 #if C_SU2000_VRLINK
     if (cl.pc >= 0) rtcDeletePeerConnection(cl.pc);
 #endif
-    if (cl.player == 1) p1_clients--;
+    if (cl.player == 1) p1_clients--; else p2_clients--;
     nclients--;
     LOG_MSG("SU2000: VR client disconnected");
 }
@@ -947,7 +978,7 @@ std::vector<std::string> lan_addresses(void) {
 } // namespace
 
 void XR_Configure(const char *format, int quality, bool audio, bool webrtc, const char *certificate) {
-    use_png = !(format && (strcmp(format, "jpeg") == 0 || strcmp(format, "jpg") == 0));
+    img_mode = !format || !strcmp(format, "auto") ? 2 : (!strcmp(format, "jpeg") || !strcmp(format, "jpg")) ? 1 : 0;
     jpeg_quality = quality < 10 ? 10 : quality > 100 ? 100 : quality;
     audio_on = audio;
     rtc_on = webrtc;
@@ -1044,30 +1075,33 @@ void XR_Poll(void) {
     /* microphone level -> format card (CTRL_GetMic), silent after 200 ms without packets */
     const double t = now_ms();
     for (int p = 0; p < 2; p++) FCARD_SetMicLevel((unsigned)p, (uint8_t)(t - mic_time[p] < 200.0 ? mic_level[p].load() : 0));
-    Input in;
-    bool fresh;
-    {
-        std::lock_guard<std::mutex> lk(mtx);
-        in = inputs[0];
-        fresh = in.seq != input_seen;
-        input_seen = in.seq;
+    /* each player drives their own tracker stations (player 2: tracker card 2) and format card */
+    static bool was_active[2] = { false, false };
+    for (int p = 0; p < 2; p++) {
+        Input in;
+        bool fresh;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            in = inputs[p];
+            fresh = in.seq != input_seen[p];
+            input_seen[p] = in.seq;
+        }
+        const bool active = (p == 0 ? p1_clients : p2_clients) > 0;
+        if (!active) {
+            if (applied_buttons[p]) { FCARD_SetPlayerButton((unsigned)p, 8, false); FCARD_SetPlayerButton((unsigned)p, 9, false); applied_buttons[p] = 0; }
+            if (was_active[p]) TRACKER_XRPose(p + 1, NULL, NULL, false);
+            was_active[p] = false;
+            continue;
+        }
+        was_active[p] = true;
+        if (!fresh && in.recenter == recenter_seen[p]) continue;
+        const bool recenter = in.recenter != recenter_seen[p];
+        recenter_seen[p] = in.recenter;
+        TRACKER_XRPose(p + 1, in.head, in.have_hand ? in.hand : NULL, recenter);
+        /* buttons: bit0 trigger -> fire (format card 8 = Ctrl+5), bit1 squeeze / bit2 A -> walk (9 = Ctrl+6) */
+        const unsigned b = (in.buttons & 1u) | ((in.buttons & 6u) ? 2u : 0u);
+        if ((b ^ applied_buttons[p]) & 1u) FCARD_SetPlayerButton((unsigned)p, 8, (b & 1u) != 0);
+        if ((b ^ applied_buttons[p]) & 2u) FCARD_SetPlayerButton((unsigned)p, 9, (b & 2u) != 0);
+        applied_buttons[p] = b;
     }
-    const bool active = p1_clients > 0;
-    static bool was_active = false;
-    if (!active) {
-        if (applied_buttons) { FCARD_SetButton(8, false); FCARD_SetButton(9, false); applied_buttons = 0; }
-        if (was_active) TRACKER_XRPose(NULL, NULL, false);
-        was_active = false;
-        return;
-    }
-    was_active = true;
-    if (!fresh && in.recenter == recenter_seen) return;
-    const bool recenter = in.recenter != recenter_seen;
-    recenter_seen = in.recenter;
-    TRACKER_XRPose(in.head, in.have_hand ? in.hand : NULL, recenter);
-    /* buttons: bit0 trigger -> fire (format card 8 = Ctrl+5), bit1 squeeze / bit2 A -> walk (9 = Ctrl+6) */
-    const unsigned b = (in.buttons & 1u) | ((in.buttons & 6u) ? 2u : 0u);
-    if ((b ^ applied_buttons) & 1u) FCARD_SetButton(8, (b & 1u) != 0);
-    if ((b ^ applied_buttons) & 2u) FCARD_SetButton(9, (b & 2u) != 0);
-    applied_buttons = b;
 }

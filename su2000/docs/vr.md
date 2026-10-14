@@ -95,7 +95,17 @@ Credits are still added on the PC (`c`).
   WebRTC, sound and microphone have not been tried in a headset yet.
 * Linux: the code builds without the libraries on the CI; the build with libdatachannel and mbedTLS has not been
   compiled yet.
-* Position placement only works in DAC (it uses DAC's data addresses); other games get orientation only.
-* Only player 1 drives the tracker; DN2's second player and the second tracker card are not wired yet.
+* Position: DAC places head and hand through its own data (closed loop); every other game gets the headset and
+  controller positions written straight into the raw tracker words (0.0916 mm per word, axes inferred from DAC).
+* Two headsets on one two-player cabinet: player 2 (page setting) drives tracker card 2 (stations 3 / 4) and format
+  card 2, and gets video channel 2. Tested with DN2 on the two-player disk: both players in one match, each sees the
+  other (scripted clients). Boxing's "link up" is a game between two cabinets, not two players of one cabinet.
+* The default head pose has raw roll 32767 (= upright: the library uses pi - roll). With 0 Ghost Train rendered
+  upside down with turns mirrored; DAC ignores head roll.
+* Images: `vr image format = auto` (default) sends PNG or JPEG, whichever is smaller per frame; PNG is deflated with
+  zlib. A video codec would need ~1-2 Mbit/s instead of 14-59 Mbit/s: see `findings/video_streaming.md`.
+* The page decodes one frame at a time (newer frames replace a waiting one) and allocates each eye's texture once:
+  unbounded decodes / per-frame allocations were the likely cause of the right eye going black in the headset under
+  load (not yet confirmed in a headset). It reports upload errors and a 30 s status line to the DOSBox-X log.
 * The relayed microphone is played centred: the format card's fade (DAC places the opponent's voice in 3D) is not
   decoded yet. See `findings/microphone.md`.

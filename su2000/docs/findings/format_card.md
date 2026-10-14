@@ -10,7 +10,7 @@ Emulation: `src/hardware/su2000/fcard.cpp` (`[su2000] ctrl ports`, `ctrl mem`).
 |---|---|---|---|
 | mem +0x00 | firmware version, BCD (version = hi·100 + lo·10) | `CTRLI_FCD_Open` 0x7d2c0 | [confirmed] |
 | mem +0x02..+0x05 | free-running counter (little-endian). Open reads it, waits 300 ms and requires it to have increased | 0x7d1f4–0x7d29d | [confirmed] |
-| mem +0x06 | card type; must be 0x81 or 0x82, otherwise error -6154 "Format C not found" | 0x7d1a1–0x7d1c7 | [confirmed] |
+| mem +0x06 | card type; must be 0x81 or 0x82, otherwise error -6154 "Format C not found". With two cards reporting 0x81, DN2 (two-player disk, CTRL v01.03.40) opened only card 2 and never read player 1's buttons; with 0x82 both open (DN2 both disks, DAC, Boxing fine) | 0x7d1a1–0x7d1c7 | [confirmed] |
 | mem +0x0A..+0x0D | joystick axes (two x/y pairs) | `CTRLI_FCD_ReadJoystick` | [confirmed offsets], centre value [inferred 0x80] |
 | mem +0x12, +0x13, +0x14 | buttons: value = (+0x14 & 0x0F) \| +0x12 << 4 \| +0x13 << 12 | `CTRLI_FCD_ReadButton` 0x7d585–0x7d5d2 | [confirmed]; polarity [inferred: 1 = pressed] |
 | mem +0x14 bit 4 | credit (coin) present | `CTRLI_FCD_GetCredit` | [confirmed] |
@@ -22,7 +22,7 @@ Emulation: `src/hardware/su2000/fcard.cpp` (`[su2000] ctrl ports`, `ctrl mem`).
 
 ## Emulation (first version)
 
-* Version 0x13, type 0x81, millisecond counter, centred joysticks. The command mailbox is acknowledged immediately (no
+* Version 0x13, type 0x82, millisecond counter, centred joysticks. The command mailbox is acknowledged immediately (no
   microcontroller); commands are logged (`SU2000: format card command ..`). Outputs are only stored.
 * Timer: 1 MHz down-counter from emulated time, restarted when counters are programmed, latched by read-back.
 * Inputs (DOSBox-X mapper, rebindable): **Ctrl+F5 coin, Ctrl+F6..F9 buttons 0..3** (bits 0..3 of +0x14). Which physical
@@ -43,3 +43,9 @@ Both configs now mount `data/work/emptycd` as CD drive F: (MSCDEX).
 * DAC (CTRL v01.03.51) reads the player triggers from **+0x13** (`CTRLI_FCD_ReadJoystick`, DAC.EXE 0x9d680): bits 0..3 player 1, 4..7 player 2, **active-high**. The start button is bit 0/1 of the button word (+0x14 bits 0/1). The stick bytes +0x0A..+0x0D are `0x7F - raw` (centre 0x7F) but DAC only forwards the stick buttons, never the axes. The operator set-up menu is always shown at boot; Enter (DAC's own joystick-button key) leaves it. The Solo cabinet's player is player 2 (Ctrl+5 fire, Ctrl+6 walk). Credits: plain `c` (DAC keyboard credit); the card's coin bit is only read in credit-device mode.
 * Which +0x13 bit is the top / front trigger; whether any game needs command responses from the microcontroller.
 * Game CDs for Pac-Man VR and Missile Command are not in either dump.
+
+## Two players on one cabinet
+
+Each format card belongs to one player: a headset on player n presses its buttons on card n only
+(`FCARD_SetPlayerButton`); mapper keys still press on every card. With both cards typed 0x82, DN2 on the two-player
+disk takes a credit (`c`) and starts a two-player match from the two headset triggers.
