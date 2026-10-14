@@ -321,7 +321,7 @@ function measure(bm){
   const c=lumCv.getContext('2d',{willReadFrequently:true});
   return bm.map(b=>{ try{ c.drawImage(b,0,0,16,12); const d=c.getImageData(0,0,16,12).data; let t=0; for(let i=0;i<d.length;i+=4) t+=d[i]+d[i+1]+d[i+2]; return Math.round(t/(16*12*3)); }catch(e){ return -2; } });
 }
-setInterval(()=>{ if(session&&gl) diag('st','status: '+'brightness '+lum+' ',+(vOn?'H.264 dropped '+vDropped:'images skipped '+skipped)+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
+setInterval(()=>{ if(session&&gl) diag('st','status: brightness '+lum+' drawn '+drawnPx+' draws '+JSON.stringify(draws)+' draw errors '+drawErr+' '+(vOn?'H.264 dropped '+vDropped:'images skipped '+skipped)+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
 let lastViews='';
 function sendInput(xf){
   const vp=xf.getViewerPose(ref); if(!vp) return null;
@@ -343,8 +343,15 @@ function sendInput(xf){
   send('P '+h.map(v=>v.toFixed(5)).join(' ')+' '+have+' '+hand.map(v=>v.toFixed(5)).join(' ')+' '+(bits&7));
   return vp;
 }
+let draws={left:0,right:0,none:0}, drawErr=0;
 function onXR(time,xf){
   session.requestAnimationFrame(onXR);
+  try{ drawXR(xf); }
+  catch(e){ drawErr++; diag('xe','XR frame error: '+e.message+' '+String(e.stack||'').split(String.fromCharCode(10)).slice(0,3).join(' | ')); }
+}
+let drawnPx=[-1,-1], probeT=0, drawnBlack=false;
+function drawXR(xf){
+  const tp=performance.now(), probe=tp-probeT>2000; if(probe) probeT=tp;
   const vp=sendInput(xf); if(!vp) return;
   if(fresh&&cur) upload();
   const layer=session.renderState.baseLayer;
@@ -361,7 +368,15 @@ function onXR(time,xf){
     gl.uniformMatrix4fv(loc.P,false,v.projectionMatrix); gl.uniformMatrix4fv(loc.V,false,v.transform.inverse.matrix);
     gl.bindTexture(gl.TEXTURE_2D,texs[(v.eye==='right')!==SWAP?1:0]);   /* ?swap=1: eyes swapped (diagnosis) */
     gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    draws[v.eye]=(draws[v.eye]||0)+1;
+    if(probe){ const px=new Uint8Array(4); gl.readPixels(r.x+(r.width>>1),r.y+(r.height>>1),1,1,gl.RGBA,gl.UNSIGNED_BYTE,px); drawnPx[v.eye==='right'?1:0]=px[0]+px[1]+px[2]; }
+    const ge=gl.getError(); if(ge){ drawErr++; diag('de'+v.eye,'draw '+v.eye+' GL error '+ge); }
   }
+  if(probe){ /* centre pixel of each eye as drawn: black only on the right means the page drew it so */
+    const b=drawnPx[0]>30&&drawnPx[1]===0;
+    if(b&&!drawnBlack) diag('pb','right eye drawn black (centre pixels '+drawnPx+'; pictures '+lum+')');
+    if(!b&&drawnBlack) diag('pb2','right eye drawn again (centre pixels '+drawnPx+')');
+    drawnBlack=b; }
 }
 </script></body></html>
 )XR";
