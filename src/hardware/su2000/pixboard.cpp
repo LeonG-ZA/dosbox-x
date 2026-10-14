@@ -381,7 +381,12 @@ bool PixBoard::render_frame(PixFrame &out) {
     if ((display_base & 0xFFC00000u) != 0x40000000u || stride == 0 || stride > 8192 || rows == 0 || rows > 512) return false;
     const bool px16 = (be32(&dram[0x2104]) >> px16_bit) & 1;
     const unsigned bpp = px16 ? 2 : 4;
+    /* the screen is narrower than the buffer line (768 pixels): 2 x (centre x + 1), the centre x being the firmware
+       global just before the buffer-rows one (0x7048 = 175 in DN2 / DAC / Ghost Train, 0x7044 in Boxing: 352 pixels).
+       Drawing beyond it (Ghost Train's cave) is not shown on the real Visette. */
     out.width = stride / bpp;
+    const uint32_t cx = be32(&dram[0x7000 + rows_off - 8]);
+    if (cx >= 16 && 2 * (cx + 1) < out.width) out.width = 2 * (cx + 1);
     out.height = rows * 0x2000u / stride;
     if (out.height > 1024) out.height = 1024;
     out.band_lo = be32(&dram[0x210C]);

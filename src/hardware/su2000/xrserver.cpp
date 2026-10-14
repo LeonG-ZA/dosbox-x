@@ -228,7 +228,9 @@ unsigned drawn_width(unsigned ci, const PixFrame *eye, bool stereo) {
         }
     if (now_w >= drawn_w[ci]) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
     else if (++drawn_narrow[ci] > 100) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
-    return drawn_w[ci] > w ? w : drawn_w[ci];
+    (void)now_w;
+    return w;   /* the full screen width: the PIX frame is cut to the real screen (pixboard.cpp); cropping black margins
+                   changed the headset screen's shape from frame to frame */
 }
 
 /* JPEG of the player's eyes for the latest frame; encoded once per frame and player. */
