@@ -84,6 +84,7 @@ bool installed = false;
 /* ---- UDP link ---- */
 std::mutex link_mtx;
 std::deque<std::vector<uint8_t>> rx_queue;          /* frames from the network, delivered on the emulation thread */
+std::deque<std::vector<uint8_t>> rx_wait;           /* frames waiting for room in the receive ring (emulation thread) */
 sock_t sock = SOCK_BAD;
 bool relay = false;
 sockaddr_in server;                                  /* client mode */
@@ -152,7 +153,7 @@ void link_loop(void) {
         if (relay) send_datagram(std::vector<uint8_t>(buf.begin(), buf.begin() + n), &from);
         std::lock_guard<std::mutex> lk(link_mtx);
         rx_queue.push_back(std::move(frame));
-        while (rx_queue.size() > 64) { rx_queue.pop_front(); card.dropped++; }
+        while (rx_queue.size() > 4096) { rx_queue.pop_front(); card.dropped++; }
     }
 }
 
@@ -209,6 +210,7 @@ void link_close(void) {
     std::lock_guard<std::mutex> lk(link_mtx);
     peers.clear();
     rx_queue.clear();
+    rx_wait.clear();
 }
 
 /* ---- 8390 ---- */
@@ -256,9 +258,14 @@ bool accept(const uint8_t *f) {
     return memcmp(f, card.par, 6) == 0;
 }
 
-void receive(const std::vector<uint8_t> &frame) {
-    if (!started() || card.pstop <= card.pstart || card.pstop > RAM_SIZE / 256) { card.drop_stopped++; return; }
-    if (frame.size() < 14 || !accept(frame.data())) { card.drop_filter++; return; }
+/* Frames that did not fit in the receive ring, kept in order until the program frees pages. Two emulated pods do not
+   run in step like real ones: a faster pod overran the slower one's ring (27% dropped), and DAC lost the reply that
+   starts a linked game ("waiting for opponent"). */
+
+/* false: the ring is full now (frame not taken; try again later) */
+bool receive(const std::vector<uint8_t> &frame) {
+    if (!started() || card.pstop <= card.pstart || card.pstop > RAM_SIZE / 256) { card.drop_stopped++; return true; }
+    if (frame.size() < 14 || !accept(frame.data())) { card.drop_filter++; return true; }
     size_t len = frame.size() < 60 ? 60 : frame.size();
     if (len > 1514) len = 1514;
     const unsigned count = (unsigned)len + 4;                       /* with the CRC */
@@ -267,7 +274,7 @@ void receive(const std::vector<uint8_t> &frame) {
     /* free pages between CURR and BNRY */
     unsigned avail = (card.bnry > card.curr) ? (unsigned)(card.bnry - card.curr) : ring - (unsigned)(card.curr - card.bnry);
     if (card.bnry == card.curr) avail = ring;
-    if (pages >= avail) { card.isr |= 0x10; card.dropped++; card.drop_full++; update_irq(); return; }  /* OVW */
+    if (pages >= avail) return false;
     unsigned next = card.curr + pages;
     if (next >= card.pstop) next -= ring;
     std::vector<uint8_t> data(count + 4, 0);
@@ -285,6 +292,7 @@ void receive(const std::vector<uint8_t> &frame) {
     card.isr |= 0x01;
     if (card.received++ < 5) LOG_MSG("SU2000: SMC 8013 received %u bytes from %02x:%02x:%02x:%02x:%02x:%02x", (unsigned)frame.size(), frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]);
     update_irq();
+    return true;
 }
 
 void deliver_event(Bitu) {
@@ -293,7 +301,9 @@ void deliver_event(Bitu) {
         std::lock_guard<std::mutex> lk(link_mtx);
         q.swap(rx_queue);
     }
-    for (const auto &f : q) receive(f);
+    for (auto &f : q) rx_wait.push_back(std::move(f));
+    while (!rx_wait.empty() && receive(rx_wait.front())) rx_wait.pop_front();
+    while (rx_wait.size() > 4096) { rx_wait.pop_front(); card.dropped++; card.drop_full++; }   /* the program stopped reading */
     static double last_stats = 0;
     const double now = PIC_FullIndex();
     if (now - last_stats >= 10000.0) {
