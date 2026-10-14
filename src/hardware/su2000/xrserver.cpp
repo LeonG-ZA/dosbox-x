@@ -121,6 +121,7 @@ static unsigned char *png_zlib(unsigned char *data, int len, int *out_len, int q
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #include "stb_image_write.h"
+#include "h264enc.h"
 
 extern void (*MIXER_TapCallback)(unsigned rate, unsigned frames, const int16_t *lr);
 
@@ -185,6 +186,7 @@ double now_ms(void) {
 
 /* ---- settings ---- */
 int jpeg_quality = 90;
+int video_mode = 1;             /* H.264 to pages that decode it (vr video = auto), 0 = images only */
 int img_mode = 2;               /* 0 png (lossless; smallest on flat-shaded pictures), 1 jpeg (textured ones), 2 the smaller per frame */
 bool audio_on = true;
 bool rtc_on = true;
@@ -211,6 +213,24 @@ std::shared_ptr<const Encoded> enc_cache[2];
 
 void jpg_write(void *ctx, void *data, int size) { ((std::string *)ctx)->append((const char *)data, (size_t)size); }
 
+/* Drawn width of channel ci (the game may draw into part of the line; caller holds mtx): the widest drawn column of
+   this frame, both eyes. Grows at once; shrinks after 2 s narrower (a full-width flash used to keep the crop at the
+   whole 768-pixel line for good: 4x the data, and the headset fell behind). */
+unsigned drawn_width(unsigned ci, const PixFrame *eye, bool stereo) {
+    const unsigned w = eye[0].width, h = eye[0].height;
+    if (drawn_for[ci] != w) { drawn_for[ci] = w; drawn_w[ci] = 8; drawn_narrow[ci] = 0; }
+    unsigned now_w = 8;
+    for (unsigned k = 0; k < (stereo ? 2u : 1u); k++)
+        for (unsigned y = 0; y < h && y * w < eye[k].pixels.size(); y += 4) {
+            const uint32_t *row = &eye[k].pixels[(size_t)y * w];
+            for (unsigned x = w; x-- > now_w;)
+                if (row[x] & 0xFFFFFFu) { now_w = (x + 8) & ~7u; if (now_w > w) now_w = w; break; }
+        }
+    if (now_w >= drawn_w[ci]) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
+    else if (++drawn_narrow[ci] > 100) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
+    return drawn_w[ci] > w ? w : drawn_w[ci];
+}
+
 /* JPEG of the player's eyes for the latest frame; encoded once per frame and player. */
 std::shared_ptr<const Encoded> encoded(int player) {
     PixFrame eye[2];
@@ -231,21 +251,7 @@ std::shared_ptr<const Encoded> encoded(int player) {
         if (e->stereo) eye[1] = channels[per_eye + ci];
         e->seq = frame_seq;
         memcpy(e->pose, frame_pose[player - 1], sizeof(e->pose));
-        /* drawn width, kept per channel */
-        const unsigned w = eye[0].width, h = eye[0].height;
-        if (drawn_for[ci] != w) { drawn_for[ci] = w; drawn_w[ci] = 8; drawn_narrow[ci] = 0; }
-        /* widest drawn column of this frame, both eyes. Grows at once; shrinks after 2 s narrower (a full-width flash
-           used to keep the crop at the whole 768-pixel line for good: 4x the data, and the headset fell behind) */
-        unsigned now_w = 8;
-        for (unsigned k = 0; k < (e->stereo ? 2u : 1u); k++)
-            for (unsigned y = 0; y < h && y * w < eye[k].pixels.size(); y += 4) {
-                const uint32_t *row = &eye[k].pixels[(size_t)y * w];
-                for (unsigned x = w; x-- > now_w;)
-                    if (row[x] & 0xFFFFFFu) { now_w = (x + 8) & ~7u; if (now_w > w) now_w = w; break; }
-            }
-        if (now_w >= drawn_w[ci]) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
-        else if (++drawn_narrow[ci] > 100) { drawn_w[ci] = now_w; drawn_narrow[ci] = 0; }
-        crop = drawn_w[ci];
+        crop = drawn_width(ci, eye, e->stereo);
     }
     const unsigned w = eye[0].width, h = eye[0].height;
     if (!w || !h) return NULL;
@@ -621,6 +627,8 @@ struct Client {
     int pc = -1;
     std::atomic<int> dc{ -1 };
     std::atomic<bool> dc_open{ false };
+    bool video = false;                    /* the page decodes H.264 ("V h264"); pictures go as SUH1 */
+    std::atomic<bool> want_key{ false };   /* the page asked for a key picture ("K") */
     void queue_text(const std::string &s) { std::lock_guard<std::mutex> lk(out_mtx); out_text.push_back(s); }
 };
 
@@ -689,6 +697,50 @@ bool client_send(Client &cl, Conn &c, const std::string &m, bool droppable) {
     return ws_send(c, 2, m.data(), m.size());
 }
 
+/* one picture as "SUJ1" (image) or "SUH1" (H.264) messages of at most 60 KB: magic, u32 frame, u8 eye, u8 eyes,
+   u16 piece, u16 pieces, u16 width, u16 height, u16 flags (bit 0 stereo, 1 PNG, 2 H.264 key picture), 7 floats pose */
+bool send_picture(Client &cl, Conn &c, const char *magic, uint32_t seq, unsigned k, unsigned eyes, unsigned w, unsigned h,
+                  unsigned flags, const float *pose, const std::string &j, bool droppable) {
+    const size_t max_piece = 60000;
+    const unsigned chunks = (unsigned)((j.size() + max_piece - 1) / max_piece);
+    for (unsigned ch = 0; ch < chunks; ch++) {
+        std::string m = magic;
+        put32(m, seq);
+        m.push_back((char)k); m.push_back((char)eyes);
+        put16(m, (uint16_t)ch); put16(m, (uint16_t)chunks);
+        put16(m, (uint16_t)w); put16(m, (uint16_t)h); put16(m, (uint16_t)flags);
+        m.append((const char *)pose, 7 * sizeof(float));
+        const size_t off = ch * max_piece;
+        m.append(j, off, j.size() - off < max_piece ? j.size() - off : max_piece);
+        /* H.264 always on the WebSocket: in order and without loss (the data channel is unordered, no retransmits) */
+        if (!(magic[2] == 'H' ? ws_send(c, 2, m.data(), m.size()) : client_send(cl, c, m, droppable))) return false;
+    }
+    return true;
+}
+
+/* the player's eye pictures of the latest frame, unencoded (H.264 path) */
+bool latest_eyes(int player, PixFrame eye[2], bool &stereo, uint32_t &seq, float *pose, unsigned &crop) {
+    std::lock_guard<std::mutex> lk(mtx);
+    if (channels.empty()) return false;
+    const unsigned per_eye = chan_stereo ? (unsigned)channels.size() / 2 : (unsigned)channels.size();
+    if (!per_eye) return false;
+    const unsigned ci = ((unsigned)player - 1) < per_eye ? (unsigned)player - 1 : 0;
+    eye[0] = channels[ci];
+    stereo = chan_stereo && channels[per_eye + ci].width == eye[0].width && channels[per_eye + ci].height == eye[0].height;
+    if (stereo) eye[1] = channels[per_eye + ci];
+    seq = frame_seq;
+    memcpy(pose, frame_pose[player - 1], 7 * sizeof(float));
+    if (eye[0].width < 2 || eye[0].height < 2) return false;
+    crop = drawn_width(ci, eye, stereo);
+    return true;
+}
+
+/* video pictures depend on the ones before: never drop pieces; skip whole frames (then restart with a key picture) */
+bool client_backlogged(Client &cl) {
+    (void)cl;   /* the WebSocket blocks instead (TCP): the frame after a slow send is simply a later one */
+    return false;
+}
+
 bool send_frame(Client &cl, Conn &c, const Encoded &e) {
     const size_t max_piece = 60000;
     const unsigned eyes = (unsigned)e.jpg.size();
@@ -723,6 +775,17 @@ void handle_ws_text(Client &cl, const std::string &msg) {
         }
         break;
     }
+    case 'V':   /* the page can decode H.264 (WebCodecs) */
+        if (msg.find("h264") != std::string::npos && video_mode != 0 && H264_Available()) {
+            cl.video = true;
+            cl.want_key = true;
+            cl.queue_text("V h264");
+            LOG_MSG("SU2000: VR client (player %d) gets H.264 video", cl.player.load());
+        }
+        break;
+    case 'K':
+        cl.want_key = true;
+        break;
     case 'L':   /* diagnostics from the headset page */
         if (msg.size() > 2) LOG_MSG("SU2000: VR client (player %d) says: %s", cl.player.load(), msg.substr(2, 200).c_str());
         break;
@@ -750,6 +813,8 @@ void serve_ws(Conn &c, std::string buf) {
     nclients++;
     LOG_MSG("SU2000: VR client connected%s", c.tls ? " (https)" : "");
     uint32_t sent_seq = 0;
+    H264Encoder henc;
+    bool need_key = true;
     uint64_t audio_sent, mic_sent;
     {
         std::lock_guard<std::mutex> lk(aud_mtx);
@@ -779,7 +844,37 @@ void serve_ws(Conn &c, std::string buf) {
             std::lock_guard<std::mutex> lk(mtx);
             seq = frame_seq;
         }
-        if (seq != sent_seq) {
+        if (seq != sent_seq && cl.video) {
+            /* H.264: the eyes alternate in one stream (left, right, left ...), so each eye is also predicted from the
+               other one; see findings/video_streaming.md */
+            sent_seq = seq;
+            PixFrame eye[2];
+            bool stereo = false;
+            uint32_t fs = 0;
+            float pose[7];
+            unsigned crop = 0;
+            if (latest_eyes(cl.player, eye, stereo, fs, pose, crop)) {
+                if (client_backlogged(cl)) need_key = true;
+                else {
+                    const bool asked = cl.want_key.exchange(false);
+                    const bool fk = need_key || asked;
+                    need_key = false;
+                    const unsigned eyes = stereo ? 2u : 1u;
+                    for (unsigned k = 0; k < eyes && ok; k++) {
+                        std::string out;
+                        bool key = false;
+                        if (!henc.encode(eye[k].pixels.data(), eye[k].width, crop < 2 ? 2 : crop, eye[k].height, fk && k == 0, out, key)) {
+                            need_key = true;
+                            break;
+                        }
+                        const unsigned flags = (stereo ? 1u : 0u) | (key ? 4u : 0u);
+                        if (!send_picture(cl, c, "SUH1", fs, k, eyes, (crop < 2 ? 2 : crop) & ~1u, eye[k].height & ~1u, flags, pose, out, false)) ok = false;
+                        stat_bytes += out.size();
+                    }
+                    stat_frames++;
+                }
+            }
+        } else if (seq != sent_seq) {
             sent_seq = seq;
             auto e = encoded(cl.player);
             if (e) {
@@ -976,6 +1071,12 @@ std::vector<std::string> lan_addresses(void) {
 }
 
 } // namespace
+
+void XR_ConfigureVideo(const char *mode, const char *library, int kbps) {
+    video_mode = mode && (!strcmp(mode, "off") || !strcmp(mode, "false") || !strcmp(mode, "none")) ? 0 : 1;
+    H264Encoder::configure(kbps < 300 ? 300u : (unsigned)kbps, 36);
+    if (video_mode) H264_Load(library);
+}
 
 void XR_Configure(const char *format, int quality, bool audio, bool webrtc, const char *certificate) {
     img_mode = !format || !strcmp(format, "auto") ? 2 : (!strcmp(format, "jpeg") || !strcmp(format, "jpg")) ? 1 : 0;

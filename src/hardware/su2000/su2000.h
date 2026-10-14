@@ -70,6 +70,7 @@ void TRACKER_XRPose(int player, const double *head, const double *hand, bool rec
 void FCARD_SetPlayerButton(unsigned card, unsigned bit, bool pressed);
 void TRACKER_DebugTick(void);
 void XR_Configure(const char *format, int jpeg_quality, bool audio, bool webrtc, const char *certificate);
+void XR_ConfigureVideo(const char *mode, const char *library, int kbps);
 void XR_Setup(int port);
 void XR_Shutdown(void);
 bool XR_Active(void);

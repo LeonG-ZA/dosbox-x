@@ -1315,6 +1315,9 @@ case "$host" in
     ;;
 esac
 
+dnl SU2000 headset video: OpenH264 is loaded at run time (h264enc.cpp)
+AC_SEARCH_LIBS([dlopen], [dl])
+
 dnl FEATURE: SU2000 VR link: https (mbedTLS) and WebRTC (libdatachannel) for the headset page
 AH_TEMPLATE(C_SU2000_VRLINK, [Define to 1 to give the SU2000 VR link https and WebRTC, requires mbedTLS 3 and libdatachannel])
 AC_ARG_ENABLE(su2000-vrlink,AC_HELP_STRING([--disable-su2000-vrlink],[Disable https / WebRTC for the SU2000 VR link]),enable_su2000_vrlink=$enableval,enable_su2000_vrlink=yes)

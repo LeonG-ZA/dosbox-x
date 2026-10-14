@@ -395,6 +395,7 @@ static void SU2000_OnReset(Section *sec) {
         TRACKER_SetMouse(s->Get_bool("tracker mouse"));
     }
     XR_Configure(s->Get_string("vr image format"), s->Get_int("vr jpeg quality"), s->Get_bool("vr audio"), s->Get_bool("vr webrtc"), s->Get_string("vr certificate"));
+    XR_ConfigureVideo(s->Get_string("vr video"), s->Get_string("vr video library"), s->Get_int("vr video kbps"));
     XR_Setup(s->Get_int("vr port"));
     {
         /* format/control cards: "ctrl ports" and "ctrl mem" pair up in order */
@@ -482,6 +483,14 @@ void SU2000_AddConfigSection(Config *conf) {
                       "smallest for the flat-shaded pictures) or jpeg (3-4x smaller than PNG on textured scenes such as DN2).");
     Pint = secprop->Add_int("vr jpeg quality", Property::Changeable::WhenIdle, 90);
     Pint->Set_help("JPEG quality (10..100) for vr image format = jpeg or auto; above 90 the colour is not subsampled.");
+    Pstring = secprop->Add_string("vr video", Property::Changeable::WhenIdle, "auto");
+    Pstring->Set_help("auto: H.264 video to headset pages that can decode it (WebCodecs), when the OpenH264 library is found;\n"
+                      "about 1-2 Mbit/s instead of 10-60 for the images. off: always images (vr image format).");
+    Pstring = secprop->Add_string("vr video library", Property::Changeable::WhenIdle, "");
+    Pstring->Set_help("OpenH264 library: file name or path. Empty: openh264-2.4.1-win64.dll (Windows) / libopenh264.so.7\n"
+                      "(Linux) next to DOSBox-X or on the library path. Cisco's binary: http://ciscobinary.openh264.org/");
+    Pint = secprop->Add_int("vr video kbps", Property::Changeable::WhenIdle, 4000);
+    Pint->Set_help("H.264 target bit rate per headset (kbit/s, both eyes); quality mode, so simple scenes use less.");
     Pbool = secprop->Add_bool("vr audio", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Send the emulator's sound to the headset (it still plays on this PC too).");
     Pbool = secprop->Add_bool("vr webrtc", Property::Changeable::WhenIdle, true);

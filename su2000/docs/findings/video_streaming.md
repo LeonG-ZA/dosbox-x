@@ -1,5 +1,7 @@
 # Headset video: still images vs. a video codec
 
+**Implemented (2026-10-14): H.264 with OpenH264, see "Implementation" at the end.**
+
 What the VR link sends today, measured against H.264 / HEVC / VP9 / AV1, and how the two eyes could share work.
 
 ## Today
@@ -82,3 +84,22 @@ Findings:
 Estimated effort: about two days (encoder integration in the Visual Studio and autotools builds, transport changes,
 page decoder with fallback, tests). The measurement script is not in the repository; it used FFmpeg and the frames
 captured over the link.
+
+## Implementation
+
+* `h264enc.cpp` loads OpenH264 at run time (`openh264-2.4.1-win64.dll` / `libopenh264.so.7`, or `[su2000] vr video
+  library`); Cisco's binaries (http://ciscobinary.openh264.org/) carry the H.264 patent licence, so the library is
+  not shipped or built: put it next to DOSBox-X. The API headers (BSD-2-Clause) are in `src/hardware/su2000/openh264/`.
+* Settings: Constrained Baseline (CAVLC), screen-content real-time mode, 2 reference pictures, no scene-change key
+  pictures, quality rate control around `[su2000] vr video kbps` (default 4000), QP 12-36, key picture every 200
+  pictures (2 s) and on request. RGB -> I420 BT.601 limited range.
+* One encoder per headset connection; the eyes alternate in one stream. The page announces WebCodecs H.264 support
+  (`V h264`), the server answers `V h264` and sends `SUH1` pictures (same 48-byte header as `SUJ1`, flags bit 2 = key)
+  on the WebSocket (ordered, lossless; the data channel is unordered without retransmits). The page decodes in order
+  with `VideoDecoder`, pairs left / right by frame number, and after a gap or decoder backlog waits for the next key
+  picture (asks with `K`). Without WebCodecs, without the library, with `vr video = off` or `?video=0` the images
+  are used as before.
+* The cropped drawn width (shared with the image path) sets the picture size; a change re-opens the encoder.
+* Measured (DN2 attract, stereo, headless Chrome as client): both eyes decoded as `VideoFrame`s, decoder queue 0,
+  140-460 KB/s against 1.4-1.9 MB/s for the images in the same scene, same frame rate (the emulator is the limit).
+  Not yet tried in a headset.

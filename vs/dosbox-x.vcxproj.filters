@@ -441,6 +441,9 @@
     <ClCompile Include="..\src\hardware\su2000\xrserver.cpp">
       <Filter>Sources\hardware</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\hardware\su2000\h264enc.cpp">
+      <Filter>Sources\hardware</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\hardware\su2000\m88110.cpp">
       <Filter>Sources\hardware</Filter>
     </ClCompile>

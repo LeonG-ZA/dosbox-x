@@ -102,8 +102,10 @@ Credits are still added on the PC (`c`).
   other (scripted clients). Boxing's "link up" is a game between two cabinets, not two players of one cabinet.
 * The default head pose has raw roll 32767 (= upright: the library uses pi - roll). With 0 Ghost Train rendered
   upside down with turns mirrored; DAC ignores head roll.
-* Images: `vr image format = auto` (default) sends PNG or JPEG, whichever is smaller per frame; PNG is deflated with
-  zlib. A video codec would need ~1-2 Mbit/s instead of 14-59 Mbit/s: see `findings/video_streaming.md`.
+* Video: with the OpenH264 library next to DOSBox-X (Cisco's `openh264-2.4.1-win64.dll`, http://ciscobinary.openh264.org/)
+  pages that support WebCodecs get H.264 (`[su2000] vr video = auto`), about 4-10x less data than the images; see
+  `findings/video_streaming.md`. Otherwise `vr image format = auto` sends PNG or JPEG, whichever is smaller per
+  frame (PNG deflated with zlib).
 * The page decodes one frame at a time (newer frames replace a waiting one) and allocates each eye's texture once:
   unbounded decodes / per-frame allocations were the likely cause of the right eye going black in the headset under
   load (not yet confirmed in a headset). It reports upload errors and a 30 s status line to the DOSBox-X log.

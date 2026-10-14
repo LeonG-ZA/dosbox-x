@@ -53,9 +53,9 @@ $('fov').onchange=()=>{fov=+$('fov').value;};
 let ws=null, pc=null, dc=null, dcOpen=false;
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'); ws.binaryType='arraybuffer';
-  ws.onopen=()=>{ws.send('S '+player); startRTC();};
-  ws.onclose=()=>{dcOpen=false; if(pc){pc.close();pc=null;} setTimeout(connect,1000);};
-  ws.onmessage=e=>{ if(typeof e.data==='string') signal(e.data); else binary(e.data); };
+  ws.onopen=()=>{ws.send('S '+player); startRTC(); videoProbe();};
+  ws.onclose=()=>{dcOpen=false; vOn=false; if(pc){pc.close();pc=null;} setTimeout(connect,1000);};
+  ws.onmessage=e=>{ if(typeof e.data!=='string') binary(e.data); else if(e.data==='V h264') videoStart(); else signal(e.data); };
 }
 function startRTC(){
   if(!window.RTCPeerConnection||Q.get('rtc')==='0') return;
@@ -78,6 +78,53 @@ function send(m){
 /* ---- incoming messages ---- */
 let cur=null, fresh=false, lastId=-1, nframes=0, asm=new Map();
 function magic(b){const u=new Uint8Array(b,0,4);return String.fromCharCode(u[0],u[1],u[2],u[3]);}
+/* ---- H.264 (WebCodecs): the server sends the eyes as alternating pictures of one stream (left, right, left ...) on the
+   WebSocket, in order. Decoded in order; after a gap or an error the page waits for the next key picture (asks with K). */
+const VCODEC='avc1.42E01F';
+let vdec=null, vOn=false, vNeedKey=true, vPend=null, vAsm=new Map(), vMeta=new Map(), vKeyAsked=0, vDropped=0;
+function videoProbe(){
+  if(!window.VideoDecoder||Q.get('video')==='0') return;
+  VideoDecoder.isConfigSupported({codec:VCODEC,optimizeForLatency:true}).then(r=>{ if(r.supported&&ws&&ws.readyState==1) ws.send('V h264'); }).catch(()=>{});
+}
+function videoStart(){
+  if(vdec) try{vdec.close();}catch(e){}
+  vMeta.clear(); vAsm.clear(); if(vPend){vPend.f.close(); vPend=null;}
+  vdec=new VideoDecoder({output:videoOut,error:e=>{diag('vd','video decoder error: '+e.message); vOn=false; setTimeout(()=>{videoStart(); askKey();},100);}});
+  vdec.configure({codec:VCODEC,optimizeForLatency:true}); vNeedKey=true; vOn=true;
+}
+function askKey(){ const t=performance.now(); if(t-vKeyAsked>300&&ws&&ws.readyState==1){ws.send('K'); vKeyAsked=t;} }
+function videoOut(f){
+  const m=vMeta.get(f.timestamp); vMeta.delete(f.timestamp);
+  if(!m){f.close(); return;}
+  if(m.eyes==1){ showVideo([f],m); return; }
+  if(m.eye==0){ if(vPend) vPend.f.close(); vPend={f,m}; return; }
+  if(vPend&&vPend.m.id==m.id){ showVideo([vPend.f,f],m); vPend=null; } else f.close();
+}
+function showVideo(bm,m){
+  if(m.id<=lastId){ bm.forEach(x=>x.close()); return; }
+  lastId=m.id; if(cur) cur.bm.forEach(x=>x.close());
+  cur={bm,w:m.w,h:m.h,eyes:bm.length,stereo:m.stereo,pose:m.pose}; fresh=true; nframes++;
+}
+function videoPiece(b,dv){
+  if(!vOn||!vdec) return;
+  const id=dv.getUint32(4,true), eye=dv.getUint8(8), eyes=dv.getUint8(9), ch=dv.getUint16(10,true), chs=dv.getUint16(12,true);
+  const k=id*2+eye; let a=vAsm.get(k);
+  if(!a){ a={parts:[],got:0,need:chs,eye,eyes,id,w:dv.getUint16(14,true),h:dv.getUint16(16,true),fl:dv.getUint16(18,true),pose:new Float32Array(b.slice(20,48))}; vAsm.set(k,a); }
+  if(a.parts[ch]) return;
+  a.parts[ch]=new Uint8Array(b,48); a.got++;
+  if(a.got<a.need) return;
+  vAsm.delete(k); for(const q of vAsm.keys()) if(q<k) vAsm.delete(q);
+  const key=(a.fl&4)!=0;
+  if(vNeedKey&&!(key&&eye==0)){ askKey(); return; }
+  if(vdec.decodeQueueSize>6){ vNeedKey=true; vDropped++; askKey(); return; }   /* decoder behind: skip to the next key picture */
+  vNeedKey=false;
+  let n=0; for(const p of a.parts) n+=p.length;
+  const data=new Uint8Array(n); n=0; for(const p of a.parts){ data.set(p,n); n+=p.length; }
+  vMeta.set(k,{id,eye,eyes,w:a.w,h:a.h,stereo:a.fl&1,pose:a.pose});
+  try{ vdec.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:k,data})); }
+  catch(e){ diag('vd2','video decode failed: '+e.message); vNeedKey=true; askKey(); }
+}
+
 let waiting=null, decoding=false, skipped=0;
 function decodeNext(){
   const w=waiting; waiting=null; if(!w){decoding=false;return;}
@@ -104,7 +151,8 @@ function binary(b){
        memory when it fell behind: the right eye went black, then the page stopped) */
     if(waiting) skipped++; waiting={id,a,eyes}; if(!decoding) decodeNext();
     if(asm.size>8) for(const k of asm.keys()) if(k<id-8) asm.delete(k);
-  } else if(m==='SUA1'){ if(audio) audio.play(0,dv.getUint16(8,true),new Int16Array(b.slice(12))); }
+  } else if(m==='SUH1'){ videoPiece(b,dv); }
+  else if(m==='SUA1'){ if(audio) audio.play(0,dv.getUint16(8,true),new Int16Array(b.slice(12))); }
   else if(m==='SUV1'&&b.byteLength>=20){ if(audio) audio.play(1,dv.getUint16(8,true),new Int16Array(b.slice(20)),dv.getFloat32(12,true),dv.getFloat32(16,true)); }
 }
 )XR";
@@ -238,20 +286,20 @@ function upload(){
   const f=cur; fresh=false; imgW=f.w; imgH=f.h; poseFrame=f.pose;
   if(f.eyes!=2) monoFrames++;
   for(let e=0;e<2;e++){
-    const b=f.bm[f.eyes==2?e:0];
+    const b=f.bm[f.eyes==2?e:0]; const bw=b?(b.displayWidth||b.width):0, bh=b?(b.displayHeight||b.height):0;   /* ImageBitmap or VideoFrame */
     try{
-      if(!b||!b.width) throw new Error('no bitmap');
+      if(!b||!bw) throw new Error('no bitmap');
       gl.bindTexture(gl.TEXTURE_2D,texs[e]);
       /* allocate once per size, then update in place (a new allocation per frame and eye ran the headset out of
          memory under load: the right eye went black) */
-      if(texW[e]!=b.width||texH[e]!=b.height){ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,b.width,b.height,0,gl.RGBA,gl.UNSIGNED_BYTE,null); texW[e]=b.width; texH[e]=b.height; }
+      if(texW[e]!=bw||texH[e]!=bh){ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,bw,bh,0,gl.RGBA,gl.UNSIGNED_BYTE,null); texW[e]=bw; texH[e]=bh; }
       gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,b);
       const ge=gl.getError(); if(ge){ texW[e]=0; throw new Error('GL error '+ge+(ge==1285?' (out of memory)':'')); }
       upl[e]++;
-    }catch(x){ uplErr[e]++; diag('u'+e,'eye '+e+' upload failed: '+x.message+' ('+(b?b.width+'x'+b.height:'none')+')'); }
+    }catch(x){ uplErr[e]++; diag('u'+e,'eye '+e+' upload failed: '+x.message+' ('+(b?bw+'x'+bh:'none')+')'); }
   }
 }
-setInterval(()=>{ if(session&&gl) diag('st','status: skipped '+skipped+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
+setInterval(()=>{ if(session&&gl) diag('st','status: '+(vOn?'H.264 dropped '+vDropped:'images skipped '+skipped)+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
 let lastViews='';
 function sendInput(xf){
   const vp=xf.getViewerPose(ref); if(!vp) return null;
