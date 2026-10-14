@@ -293,6 +293,12 @@ function diag(k,m){ const t=performance.now(); if(diagLast[k]&&t-diagLast[k]<500
 function upload(){
   const f=cur; fresh=false; imgW=f.w; imgH=f.h; poseFrame=f.pose;
   if(f.eyes!=2) monoFrames++;
+  const tn=performance.now();
+  if(tn-lumT>2000&&f.bm.length){ lumT=tn; lum=measure(f.bm);
+    const black=f.eyes==2&&lum[0]>12&&lum[1]>=0&&lum[1]<2;
+    if(black&&!lumBlack) diag('lb','right eye picture black as received (brightness '+lum+', '+f.w+'x'+f.h+')');
+    if(!black&&lumBlack) diag('lb2','right eye picture back (brightness '+lum+')');
+    lumBlack=black; }
   for(let e=0;e<2;e++){
     const b=f.bm[f.eyes==2?e:0]; const bw=b?(b.displayWidth||b.width):0, bh=b?(b.displayHeight||b.height):0;   /* ImageBitmap or VideoFrame */
     try{
@@ -307,7 +313,15 @@ function upload(){
     }catch(x){ uplErr[e]++; diag('u'+e,'eye '+e+' upload failed: '+x.message+' ('+(b?bw+'x'+bh:'none')+')'); }
   }
 }
-setInterval(()=>{ if(session&&gl) diag('st','status: '+(vOn?'H.264 dropped '+vDropped:'images skipped '+skipped)+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
+/* brightness of the pictures as received, every 2 s: says at once if the right eye's picture data goes black */
+const SWAP=Q.get('swap')==='1';
+let lum=[-1,-1], lumT=0, lumCv=null, lumBlack=false;
+function measure(bm){
+  if(!lumCv){ lumCv=document.createElement('canvas'); lumCv.width=16; lumCv.height=12; }
+  const c=lumCv.getContext('2d',{willReadFrequently:true});
+  return bm.map(b=>{ try{ c.drawImage(b,0,0,16,12); const d=c.getImageData(0,0,16,12).data; let t=0; for(let i=0;i<d.length;i+=4) t+=d[i]+d[i+1]+d[i+2]; return Math.round(t/(16*12*3)); }catch(e){ return -2; } });
+}
+setInterval(()=>{ if(session&&gl) diag('st','status: '+'brightness '+lum+' ',+(vOn?'H.264 dropped '+vDropped:'images skipped '+skipped)+' uploads '+upl+' errors '+uplErr+' mono '+monoFrames+' views '+lastViews+(gl.isContextLost()?' CONTEXT LOST':'')+' frame '+imgW+'x'+imgH); },30000);
 let lastViews='';
 function sendInput(xf){
   const vp=xf.getViewerPose(ref); if(!vp) return null;
@@ -345,7 +359,7 @@ function onXR(time,xf){
   for(const v of vp.views){
     const r=layer.getViewport(v); if(!r){diag('vp','no viewport for '+v.eye); continue;} gl.viewport(r.x,r.y,r.width,r.height);
     gl.uniformMatrix4fv(loc.P,false,v.projectionMatrix); gl.uniformMatrix4fv(loc.V,false,v.transform.inverse.matrix);
-    gl.bindTexture(gl.TEXTURE_2D,texs[v.eye==='right'?1:0]);
+    gl.bindTexture(gl.TEXTURE_2D,texs[(v.eye==='right')!==SWAP?1:0]);   /* ?swap=1: eyes swapped (diagnosis) */
     gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
 }
