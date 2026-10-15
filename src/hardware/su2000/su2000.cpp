@@ -489,7 +489,7 @@ void SU2000_AddConfigSection(Config *conf) {
     Pstring = secprop->Add_string("vr video library", Property::Changeable::WhenIdle, "");
     Pstring->Set_help("OpenH264 library: file name or path. Empty: openh264-2.4.1-win64.dll (Windows) / libopenh264.so.7\n"
                       "(Linux) next to DOSBox-X or on the library path. Cisco's binary: http://ciscobinary.openh264.org/");
-    Pint = secprop->Add_int("vr video kbps", Property::Changeable::WhenIdle, 4000);
+    Pint = secprop->Add_int("vr video kbps", Property::Changeable::WhenIdle, 10000);
     Pint->Set_help("H.264 target bit rate per headset (kbit/s, both eyes); quality mode, so simple scenes use less.");
     Pbool = secprop->Add_bool("vr audio", Property::Changeable::WhenIdle, true);
     Pbool->Set_help("Send the emulator's sound to the headset (it still plays on this PC too).");

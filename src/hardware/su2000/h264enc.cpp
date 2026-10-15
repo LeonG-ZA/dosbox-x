@@ -70,7 +70,7 @@ void to_i420(const uint32_t *px, unsigned stride, unsigned w, unsigned h, uint8_
 
 } // namespace
 
-unsigned H264Encoder::s_kbps = 4000, H264Encoder::s_max_qp = 36;
+unsigned H264Encoder::s_kbps = 10000, H264Encoder::s_max_qp = 28;
 
 bool H264_Load(const char *name) {
     std::lock_guard<std::mutex> lk(load_mtx);

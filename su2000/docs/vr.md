@@ -100,6 +100,10 @@ Credits are still added on the PC (`c`).
 * Two headsets on one two-player cabinet: player 2 (page setting) drives tracker card 2 (stations 3 / 4) and format
   card 2, and gets video channel 2. Tested with DN2 on the two-player disk: both players in one match, each sees the
   other (scripted clients). Boxing's "link up" is a game between two cabinets, not two players of one cabinet.
+  Played with a headset on player 1 and a scripted player 2: DN2 chooses the difficulty with the hand aim and the trigger,
+  and a held walk button flips the choice (both players ended up in the Beginner tutorial). The test aid
+  `SU2K_P2_FOLLOWS_P1=1` (environment) makes player 2 copy player 1's head, hand and buttons; with it both reach the
+  chosen match and player 2 visibly moves with player 1.
 * The default head pose has raw roll 32767 (= upright: the library uses pi - roll). With 0 Ghost Train rendered
   upside down with turns mirrored; DAC ignores head roll.
 * Video: with the OpenH264 library next to DOSBox-X (Cisco's `openh264-2.4.1-win64.dll`, http://ciscobinary.openh264.org/)

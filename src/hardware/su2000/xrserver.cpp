@@ -1076,7 +1076,7 @@ std::vector<std::string> lan_addresses(void) {
 
 void XR_ConfigureVideo(const char *mode, const char *library, int kbps) {
     video_mode = mode && (!strcmp(mode, "off") || !strcmp(mode, "false") || !strcmp(mode, "none")) ? 0 : 1;
-    H264Encoder::configure(kbps < 300 ? 300u : (unsigned)kbps, 36);
+    H264Encoder::configure(kbps < 300 ? 300u : (unsigned)kbps, 28);   /* QP 36 left visible artefacts */
     if (video_mode) H264_Load(library);
 }
 
@@ -1180,6 +1180,7 @@ void XR_Poll(void) {
     for (int p = 0; p < 2; p++) FCARD_SetMicLevel((unsigned)p, (uint8_t)(t - mic_time[p] < 200.0 ? mic_level[p].load() : 0));
     /* each player drives their own tracker stations (player 2: tracker card 2) and format card */
     static bool was_active[2] = { false, false };
+    static const bool follow = getenv("SU2K_P2_FOLLOWS_P1") != NULL;   /* test aid, see below */
     for (int p = 0; p < 2; p++) {
         Input in;
         bool fresh;
@@ -1188,6 +1189,16 @@ void XR_Poll(void) {
             in = inputs[p];
             fresh = in.seq != input_seen[p];
             input_seen[p] = in.seq;
+            if (follow && p == 1) {
+                /* test aid: a scripted player 2 copies player 1's head, hand and trigger (menus are chosen by aiming
+                   the hand) (menus are chosen by aiming the hand) */
+                const Input &a = inputs[0];
+                memcpy(in.head, a.head, sizeof(in.head));
+                memcpy(in.hand, a.hand, sizeof(in.hand));
+                in.have_hand = a.have_hand;
+                in.buttons = a.buttons;   /* all of them: a held walk button flipped DN2's menu choice */
+                fresh = true;
+            }
         }
         const bool active = (p == 0 ? p1_clients : p2_clients) > 0;
         if (!active) {
@@ -1202,7 +1213,7 @@ void XR_Poll(void) {
         recenter_seen[p] = in.recenter;
         TRACKER_XRPose(p + 1, in.head, in.have_hand ? in.hand : NULL, recenter);
         /* buttons: bit0 trigger -> fire (format card 8 = Ctrl+5), bit1 squeeze / bit2 A -> walk (9 = Ctrl+6) */
-        const unsigned b = (in.buttons & 1u) | ((in.buttons & 6u) ? 2u : 0u);
+        unsigned b = (in.buttons & 1u) | ((in.buttons & 6u) ? 2u : 0u);
         if ((b ^ applied_buttons[p]) & 1u) FCARD_SetPlayerButton((unsigned)p, 8, (b & 1u) != 0);
         if ((b ^ applied_buttons[p]) & 2u) FCARD_SetPlayerButton((unsigned)p, 9, (b & 2u) != 0);
         applied_buttons[p] = b;
