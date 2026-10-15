@@ -50,7 +50,7 @@ Each format card belongs to one player: a headset on player n presses its button
 (`FCARD_SetPlayerButton`); mapper keys still press on every card. With both cards typed 0x82, DN2 on the two-player
 disk takes a credit (`c`) and starts a two-player match from the two headset triggers.
 
-## Pac-Man VR without its CD
+## Games without their CDs
 
 `PAC.EXE` (v01.01.00) reads every data file from its own directory on the hard disk (`RUNFILES\`, `FLIC\`,
 `MODELS`, `TEXTURES`, ...). The CD is used twice:
@@ -64,3 +64,21 @@ disk takes a credit (`c`) and starts a two-player match from the two headset tri
 
 With `pac /n /cd- /solo` (Solo disk) the game starts without a CD: title, high score and attract mode render.
 Without the CD there is no music; sound effects come from the Soundscape card as usual.
+
+### Other games (2026-10-15)
+
+Every game also contains "Security check failed" / "Int 0x2F call failed - MSCDEX Not found": those are the shared
+CTRL / CD libraries (`CTRL_CheckSecurity` is the format card check) and pass in the emulator. The game-specific CD
+checks, all skipped by the same undocumented Virtuality option `/n` (or `/N`):
+
+| Game | Check | Without the CD |
+|---|---|---|
+| Pac-Man VR (Solo disk) | opens `F:\pac\pac.exe` (and `G:` for CD #2), fatal | `pac /n /cd- /solo` runs (no music) |
+| Missile Command VR (Solo disk) | reads 4 KB from the CD and looks for "Missile Command" / "01.00.10", fatal; flag 0xb8b68 cleared by `/n` (option parser 0x10414; `/nn` does something else) | `miss /n` runs; music would come from CD tracks (PLAYCD / FADECD) |
+| Shoot for Loot (Solo disk) | "CHECKING CD DRIVE", reads the CD and looks for "SFL", fatal ("No CD in drive?") | `sfl /n /vcc` runs (flag 0x1a72ac set by `/n`, string compare at 0x1d39d) |
+| Ghost Train (two-player disk) | looks for "GHOST" on the CD; prints "No CD Present?" and carries on | runs as it is; the Solo disk's Ghost Train has no check |
+| Boxing | "no disk present" messages only | runs |
+
+All their data (models, textures, levels, sounds) is on the hard disk; the CDs carry the Red Book music and the
+security marker. Shoot for Loot on the two-player disk stops earlier with "Not enough memory to allocate file
+structures" (a DOS set-up problem of that configuration, not the CD).
