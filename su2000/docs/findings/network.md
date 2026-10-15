@@ -92,3 +92,15 @@ Results:
   PC allows and DAC transmits every frame, so the traffic is far above a real pod's; lost handshake frames are the
   likely reason the four-pod start falls apart. Next step: pace the link (limit frames per emulated second, or make
   the receive ring drain faster) before trying four pods again. Two pods remain the tested configuration.
+
+## Receive ring and the linked start (2026-10-15)
+
+Two emulated pods do not run in step like real ones. The faster pod overran the slower one's receive ring (27% of
+the frames dropped) and DAC lost the reply that starts a linked game: one pod stayed at "waiting for opponent".
+Frames that do not fit in the ring now wait in order in the emulator (up to 4096) and go in when the program frees
+pages. Since then two pods link every time with 0 frames dropped (~109,000 each way in one session).
+
+Starting a linked DAC game (two pods, master + slave drive copies): both pods in attract mode, one player presses
+start (the other pod accepts and presses start too), then both press the trigger on "focus Visette". A pod that is
+pressed before the other reaches attract starts a local game instead. Tested with a player in a headset on pod A and
+a scripted player on pod B: both in one four-player match, each seeing the other walk and fire.
