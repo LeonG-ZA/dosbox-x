@@ -33,7 +33,7 @@ Emulation: `src/hardware/su2000/fcard.cpp` (`[su2000] ctrl ports`, `ctrl mem`).
 | Program | Before | Now |
 |---|---|---|
 | Dactyl Nightmare (Solo) | waited in the set-up menu, "Format C not found" | card opens ("CTRL library", "Backlight disabled"), card commands sent; still in the operator menu, which waits for trigger presses (try Ctrl+F6..F9 interactively) |
-| Pac-Man VR | "Initialise_Hardware: (CTRL_Open) Format C not found" | CTRL opens; now stops at "CD #1 failed security check" (needs the Pac-Man VR CD) |
+| Pac-Man VR | "Initialise_Hardware: (CTRL_Open) Format C not found" | CTRL opens; stops at "CD #1 failed security check" without its CD. **Runs without the CD as `pac /n /cd- /solo`**: the CD only holds the audio tracks; all data is on the hard disk (see below) |
 | Missile Command | "Format C not found" | CTRL opens; with an empty CD drive mounted: "Not a Missile Command VR CD in drive 1" (needs its CD) |
 
 Both configs now mount `data/work/emptycd` as CD drive F: (MSCDEX).
@@ -49,3 +49,18 @@ Both configs now mount `data/work/emptycd` as CD drive F: (MSCDEX).
 Each format card belongs to one player: a headset on player n presses its buttons on card n only
 (`FCARD_SetPlayerButton`); mapper keys still press on every card. With both cards typed 0x82, DN2 on the two-player
 disk takes a credit (`c`) and starts a two-player match from the two headset triggers.
+
+## Pac-Man VR without its CD
+
+`PAC.EXE` (v01.01.00) reads every data file from its own directory on the hard disk (`RUNFILES\`, `FLIC\`,
+`MODELS`, `TEXTURES`, ...). The CD is used twice:
+
+* **Security check** (code at 0x24aaa): when the flag at 0x9bb44 is set (default 1) it opens `F:\pac\pac.exe`
+  (CD #1) and, on a two-player cabinet, `G:\pac\pac.exe` (CD #2); if the file cannot be opened the game stops with
+  "CD #n failed security check". Nothing is read from the file. The undocumented option `/n` (exactly `/n` or `/N`,
+  option parser 0x196bf) clears the flag.
+* **CD audio** (CD library, Red Book tracks for the music): on by default, off with `/cd-` (documented; flag 0x136164),
+  which prints "No CD audio".
+
+With `pac /n /cd- /solo` (Solo disk) the game starts without a CD: title, high score and attract mode render.
+Without the CD there is no music; sound effects come from the Soundscape card as usual.
