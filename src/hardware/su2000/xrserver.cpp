@@ -330,6 +330,7 @@ void audio_tap(unsigned rate, unsigned frames, const int16_t *lr) {
 }
 
 std::atomic<int> mic_level[2];
+std::atomic<unsigned> mic_packets[2], mic_peak[2];
 std::atomic<double> mic_time[2];
 
 void handle_mic(const char *d, size_t n, int player) {
@@ -339,6 +340,11 @@ void handle_mic(const char *d, size_t n, int player) {
     int peak = 0;
     for (unsigned i = 0; i < frames; i++) { const int v = abs((int)(int16_t)get16(d + 12 + 2 * i)); if (v > peak) peak = v; }
     mic_level[player - 1] = peak >> 7;
+    /* log: first packet per player, then counts in the client status line */
+    static bool mic_seen[2] = { false, false };
+    if (!mic_seen[player - 1]) { mic_seen[player - 1] = true; LOG_MSG("SU2000: microphone of player %d: first packet (%u Hz, %u samples)", player, (unsigned)get16(d + 8), frames); }
+    mic_packets[player - 1]++;
+    if (peak > mic_peak[player - 1]) mic_peak[player - 1] = peak;
     mic_time[player - 1] = now_ms();
     SMC_SendVoice(d, 12 + (size_t)frames * 2);        /* to the other pods (MICNET line) */
     std::lock_guard<std::mutex> lk(aud_mtx);
@@ -829,8 +835,10 @@ void serve_ws(Conn &c, std::string buf) {
     while (ok && running) {
         if (now_ms() - stat_t0 >= 10000.0) {
             const double s = (now_ms() - stat_t0) / 1000.0;
-            LOG_MSG("SU2000: VR client (player %d) via %s: %.0f frames/s, %.0f KB/s", cl.player.load(),
-                    cl.dc_open ? "WebRTC" : "WebSocket", stat_frames / s, stat_bytes / s / 1024.0);
+            const int pl = cl.player.load();
+            LOG_MSG("SU2000: VR client (player %d) via %s: %.0f frames/s, %.0f KB/s; microphone %u packets, peak %u", pl,
+                    cl.dc_open ? "WebRTC" : "WebSocket", stat_frames / s, stat_bytes / s / 1024.0,
+                    mic_packets[pl - 1].exchange(0), mic_peak[pl - 1].exchange(0));
             stat_t0 = now_ms(); stat_frames = 0; stat_bytes = 0;
         }
         /* signalling from libdatachannel threads */
